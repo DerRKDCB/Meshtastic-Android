@@ -38,6 +38,7 @@ import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +46,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -456,6 +459,8 @@ private fun MessageInput(
     val isOverLimit = currentByteLength > maxByteSize
     val canSend = !isOverLimit && currentText.isNotEmpty() && isEnabled
 
+    var showAttachmentMenu by remember { mutableStateOf(false) }
+
     OutlinedTextField(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
         state = textFieldState,
@@ -465,6 +470,14 @@ private fun MessageInput(
         shape = RoundedCornerShape(ROUNDED_CORNER_PERCENT.toFloat()),
         isError = isOverLimit,
         placeholder = { Text(stringResource(Res.string.type_a_message)) },
+        leadingIcon = {
+            IconButton(onClick = { showAttachmentMenu = true }) {
+                Icon(
+                    imageVector = Icons.Filled.AttachFile,
+                    contentDescription = "Attachment",
+                )
+            }
+        },
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
         supportingText = {
             if (isEnabled) { // Only show supporting text if input is enabled
@@ -495,6 +508,20 @@ private fun MessageInput(
             }
         },
     )
+
+    DropdownMenu(
+        expanded = showAttachmentMenu,
+        onDismissRequest = { showAttachmentMenu = false }
+    ) {
+        DropdownMenuItem(
+            text = { Text("Image") },
+            onClick = { showAttachmentMenu = false }
+        )
+        DropdownMenuItem(
+            text = { Text("File") },
+            onClick = { showAttachmentMenu = false }
+        )
+    }
 }
 
 @PreviewLightDark

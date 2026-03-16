@@ -192,6 +192,9 @@
     <string name="qr_code">QR code</string>
     <string name="unknown_username">Unknown Username</string>
     <string name="send">Send</string>
+    <string name="attachment">Attachment</string>
+    <string name="attach_image">Image</string>
+    <string name="attach_file">File</string>
     <string name="warning_not_paired">You haven't yet paired a Meshtastic compatible radio with this phone. Please pair a device and set your username.\n\nThis open-source application is in development, if you find problems please post on our forum: https://github.com/orgs/meshtastic/discussions.\n\nFor more information see our web page - www.meshtastic.org.</string>
     <string name="you">You</string>
     <string name="analytics_okay">Allow analytics and crash reporting.</string>
