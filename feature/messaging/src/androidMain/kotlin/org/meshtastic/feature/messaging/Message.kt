@@ -19,6 +19,9 @@
 package org.meshtastic.feature.messaging
 
 import android.content.ClipData
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
@@ -50,11 +53,14 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
+import android.util.Base64
+import java.io.ByteArrayOutputStream
+import java.util.UUID
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.Button
 import androidx.compose.ui.window.Dialog
 import androidx.compose.material3.RadioButton
@@ -452,16 +458,31 @@ private fun ImageAdjustmentDialog(
     val context = LocalContext.current
     val sizes = listOf(32, 64, 128, 256, 512)
     var scaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var chunks by remember { mutableStateOf<List<String>>(emptyList()) }
 
     LaunchedEffect(imageUri, selectedSize) {
         withContext(Dispatchers.IO) {
             context.contentResolver.openInputStream(imageUri)?.use { input ->
-                val original = BitmapFactory.decodeStream(input)
+                val original: Bitmap? = BitmapFactory.decodeStream(input)
                 original?.let {
                     val ratio = minOf(selectedSize.toFloat() / it.width, selectedSize.toFloat() / it.height)
                     val newWidth = (it.width * ratio).toInt()
                     val newHeight = (it.height * ratio).toInt()
                     scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
+
+                    // Encode to Base64 and create chunks
+                    scaledBitmap?.let { bmp ->
+                        val imageId = java.util.UUID.randomUUID().toString().take(8)
+                        val baos = java.io.ByteArrayOutputStream()
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 90, baos)
+                        val base64 = android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.DEFAULT)
+                        val chunkSize = 200
+                        val dataChunks = base64.chunked(chunkSize)
+                        val totalParts = dataChunks.size
+                        chunks = dataChunks.mapIndexed { index, chunk ->
+                            "IMG:$imageId|PART:${index + 1}/$totalParts|DATA:data:image/jpeg;base64,$chunk"
+                        }
+                    }
                 }
             }
         }
@@ -470,17 +491,18 @@ private fun ImageAdjustmentDialog(
     Dialog(onDismissRequest = onCancel) {
         Surface(
             shape = RoundedCornerShape(8.dp),
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f).padding(16.dp)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                modifier = Modifier.padding(16.dp).fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
             ) {
                 scaledBitmap?.let {
                     Image(
                         bitmap = it.asImageBitmap(),
                         contentDescription = "Image preview",
-                        modifier = Modifier.size(200.dp)
+                        modifier = Modifier.fillMaxWidth().height(400.dp)
                     )
                 }
 
@@ -500,6 +522,10 @@ private fun ImageAdjustmentDialog(
                         Text("$size px")
                     }
                 }
+
+                Spacer(modifier = Modifier.size(16.dp))
+
+                Text("Number of chunks: ${chunks.size}")
 
                 Spacer(modifier = Modifier.size(16.dp))
 
@@ -629,9 +655,9 @@ private fun MessageInput(
         )
     }
 
-    if (selectedImageUri != null) {
+    selectedImageUri?.let { uri ->
         ImageAdjustmentDialog(
-            imageUri = selectedImageUri!!,
+            imageUri = uri,
             selectedSize = selectedSize,
             onSizeChange = { selectedSize = it },
             onSend = { /* TODO: send */ selectedImageUri = null },
