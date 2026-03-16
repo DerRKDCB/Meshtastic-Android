@@ -48,6 +48,22 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.Button
+import androidx.compose.ui.window.Dialog
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -423,6 +439,85 @@ private fun handleQuickChatAction(
 }
 
 /**
+ * Dialog for adjusting image size before sending.
+ */
+@Composable
+private fun ImageAdjustmentDialog(
+    imageUri: Uri,
+    selectedSize: Int,
+    onSizeChange: (Int) -> Unit,
+    onSend: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val context = LocalContext.current
+    val sizes = listOf(32, 64, 128, 256, 512)
+    var scaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(imageUri, selectedSize) {
+        withContext(Dispatchers.IO) {
+            context.contentResolver.openInputStream(imageUri)?.use { input ->
+                val original = BitmapFactory.decodeStream(input)
+                original?.let {
+                    val ratio = minOf(selectedSize.toFloat() / it.width, selectedSize.toFloat() / it.height)
+                    val newWidth = (it.width * ratio).toInt()
+                    val newHeight = (it.height * ratio).toInt()
+                    scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
+                }
+            }
+        }
+    }
+
+    Dialog(onDismissRequest = onCancel) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                scaledBitmap?.let {
+                    Image(
+                        bitmap = it.asImageBitmap(),
+                        contentDescription = "Image preview",
+                        modifier = Modifier.size(200.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.size(16.dp))
+
+                Text("Select maximum side length:")
+
+                sizes.forEach { size ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        RadioButton(
+                            selected = selectedSize == size,
+                            onClick = { onSizeChange(size) }
+                        )
+                        Text("$size px")
+                    }
+                }
+
+                Spacer(modifier = Modifier.size(16.dp))
+
+                Row {
+                    Button(onClick = onCancel) {
+                        Text("Cancel")
+                    }
+                    Spacer(modifier = Modifier.size(8.dp))
+                    Button(onClick = onSend) {
+                        Text("Send")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * The text input field for composing messages.
  *
  * @param isEnabled Whether the input field should be enabled.
@@ -460,6 +555,14 @@ private fun MessageInput(
     val canSend = !isOverLimit && currentText.isNotEmpty() && isEnabled
 
     var showAttachmentMenu by remember { mutableStateOf(false) }
+
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+
+    var selectedSize by remember { mutableStateOf(128) }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        selectedImageUri = uri
+    }
 
     OutlinedTextField(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
@@ -515,11 +618,24 @@ private fun MessageInput(
     ) {
         DropdownMenuItem(
             text = { Text("Image") },
-            onClick = { showAttachmentMenu = false }
+            onClick = { 
+                showAttachmentMenu = false
+                imagePickerLauncher.launch("image/*")
+            }
         )
         DropdownMenuItem(
             text = { Text("File") },
             onClick = { showAttachmentMenu = false }
+        )
+    }
+
+    if (selectedImageUri != null) {
+        ImageAdjustmentDialog(
+            imageUri = selectedImageUri!!,
+            selectedSize = selectedSize,
+            onSizeChange = { selectedSize = it },
+            onSend = { /* TODO: send */ selectedImageUri = null },
+            onCancel = { selectedImageUri = null }
         )
     }
 }
