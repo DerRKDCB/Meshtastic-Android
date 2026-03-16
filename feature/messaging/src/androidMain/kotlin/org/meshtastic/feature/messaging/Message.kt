@@ -382,6 +382,9 @@ fun MessageScreen(
                             onEvent(MessageScreenEvent.SendMessage(messageText, replyingToPacketId))
                         }
                     },
+                    onSendChunk = { chunk -> onEvent(MessageScreenEvent.SendMessage(chunk, null)) },
+                    viewModel = viewModel,
+                    contactKey = contactKey
                 )
             }
         },
@@ -452,7 +455,7 @@ private fun ImageAdjustmentDialog(
     imageUri: Uri,
     selectedSize: Int,
     onSizeChange: (Int) -> Unit,
-    onSend: () -> Unit,
+    onSend: (List<String>) -> Unit,
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -476,11 +479,13 @@ private fun ImageAdjustmentDialog(
                         val baos = java.io.ByteArrayOutputStream()
                         bmp.compress(Bitmap.CompressFormat.JPEG, 90, baos)
                         val base64 = android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.DEFAULT)
-                        val chunkSize = 200
-                        val dataChunks = base64.chunked(chunkSize)
+                        val chunkSize = 175
+                        val headerTemplate = "IMG:$imageId|PART:xx/xx|DATA:"
+                        val maxDataLen = chunkSize - headerTemplate.length
+                        val dataChunks = base64.chunked(maxDataLen)
                         val totalParts = dataChunks.size
                         chunks = dataChunks.mapIndexed { index, chunk ->
-                            "IMG:$imageId|PART:${index + 1}/$totalParts|DATA:data:image/jpeg;base64,$chunk"
+                            "IMG:$imageId|PART:${index + 1}/$totalParts|DATA:$chunk"
                         }
                     }
                 }
@@ -534,7 +539,7 @@ private fun ImageAdjustmentDialog(
                         Text("Cancel")
                     }
                     Spacer(modifier = Modifier.size(8.dp))
-                    Button(onClick = onSend) {
+                    Button(onClick = { onSend(chunks) }) {
                         Text("Send")
                     }
                 }
@@ -561,6 +566,9 @@ private fun MessageInput(
     modifier: Modifier = Modifier,
     maxByteSize: Int = MESSAGE_CHARACTER_LIMIT_BYTES,
     onSendMessage: () -> Unit,
+    viewModel: MessageViewModel?,
+    contactKey: String,
+    onSendChunk: ((String) -> Unit)? = null,
 ) {
     val currentTextRaw = textFieldState.text.toString()
 
@@ -655,12 +663,24 @@ private fun MessageInput(
         )
     }
 
+    val coroutineScope = rememberCoroutineScope()
+
     selectedImageUri?.let { uri ->
         ImageAdjustmentDialog(
             imageUri = uri,
             selectedSize = selectedSize,
             onSizeChange = { selectedSize = it },
-            onSend = { /* TODO: send */ selectedImageUri = null },
+            onSend = { chunks ->
+                selectedImageUri = null
+                coroutineScope.launch {
+                    if (onSendChunk != null && chunks.isNotEmpty()) {
+                        for (chunk in chunks) {
+                            onSendChunk(chunk)
+                            kotlinx.coroutines.delay(3000)
+                        }
+                    }
+                }
+            },
             onCancel = { selectedImageUri = null }
         )
     }
@@ -672,11 +692,14 @@ private fun MessageInputPreview() {
     AppTheme {
         Surface {
             Column(modifier = Modifier.padding(8.dp)) {
+                val dummyContactKey = "preview"
                 MessageInput(
                     isEnabled = true,
                     isHomoglyphEncodingEnabled = false,
                     textFieldState = rememberTextFieldState("Hello"),
                     onSendMessage = {},
+                    viewModel = null,
+                    contactKey = dummyContactKey
                 )
                 Spacer(Modifier.size(16.dp))
                 MessageInput(
@@ -684,6 +707,8 @@ private fun MessageInputPreview() {
                     isHomoglyphEncodingEnabled = false,
                     textFieldState = rememberTextFieldState("Disabled"),
                     onSendMessage = {},
+                    viewModel = null,
+                    contactKey = dummyContactKey
                 )
                 Spacer(Modifier.size(16.dp))
                 MessageInput(
@@ -696,6 +721,8 @@ private fun MessageInputPreview() {
                     ),
                     onSendMessage = {},
                     maxByteSize = 50, // Test with a smaller limit
+                    viewModel = null,
+                    contactKey = dummyContactKey
                 )
                 Spacer(Modifier.size(16.dp))
                 // Test Japanese characters (multi-byte)
@@ -705,6 +732,8 @@ private fun MessageInputPreview() {
                     textFieldState = rememberTextFieldState("こんにちは世界"), // Hello World in Japanese
                     onSendMessage = {},
                     maxByteSize = 10,
+                    viewModel = null,
+                    contactKey = dummyContactKey
                     // Each char is 3 bytes, so "こん" (6 bytes) is ok, "こんに" (9 bytes) is ok, "こんにち"
                     // (12 bytes) is over
                 )
