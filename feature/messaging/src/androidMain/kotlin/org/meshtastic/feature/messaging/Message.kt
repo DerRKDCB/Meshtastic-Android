@@ -688,7 +688,7 @@ private fun buildImageChunks(imageId: String, jpegBytes: ByteArray, maxChunkLeng
         var partIndex = 1
 
         while (cursor < base64.length) {
-            val header = "IMG:$imageId|PART:$partIndex/$totalPartsGuess|DATA:"
+            val header = "IMG:$imageId|$partIndex/$totalPartsGuess|"
             val maxDataLength = maxChunkLength - header.length
             if (maxDataLength <= 0) return emptyList()
 
