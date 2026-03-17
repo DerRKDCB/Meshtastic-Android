@@ -50,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
@@ -118,6 +119,15 @@ import org.meshtastic.core.resources.save
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.type_a_message
 import org.meshtastic.core.resources.unknown_channel
+import org.meshtastic.core.resources.attachment
+import org.meshtastic.core.resources.attach_file
+import org.meshtastic.core.resources.attach_image
+import org.meshtastic.core.resources.cancel
+import org.meshtastic.core.resources.image_adjustment_chunk_delay
+import org.meshtastic.core.resources.image_adjustment_chunk_delay_value
+import org.meshtastic.core.resources.image_adjustment_number_of_chunks
+import org.meshtastic.core.resources.image_adjustment_preview
+import org.meshtastic.core.resources.image_adjustment_select_max_side_length
 import org.meshtastic.core.ui.component.SharedContactDialog
 import org.meshtastic.core.ui.component.smartScrollToIndex
 import org.meshtastic.core.ui.theme.AppTheme
@@ -135,6 +145,9 @@ private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
 private const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
 private const val IMAGE_CHUNK_MAX_LENGTH = 175
+private const val MIN_IMAGE_CHUNK_DELAY_MILLIS = 3_000
+private const val MAX_IMAGE_CHUNK_DELAY_MILLIS = 5 * 60 * 1_000
+private const val DEFAULT_IMAGE_CHUNK_DELAY_MILLIS = 15_000
 
 private data class DecodeImageUiState(
     val visible: Boolean = false,
@@ -853,8 +866,10 @@ private fun handleQuickChatAction(
 private fun ImageAdjustmentDialog(
     imageUri: Uri,
     selectedSize: Int,
+    selectedChunkDelayMillis: Int,
     onSizeChange: (Int) -> Unit,
-    onSend: (List<String>) -> Unit,
+    onChunkDelayChange: (Int) -> Unit,
+    onSend: (List<String>, Int) -> Unit,
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -874,8 +889,8 @@ private fun ImageAdjustmentDialog(
 
                     // Encode to Base64 and create chunks
                     scaledBitmap?.let { bmp ->
-                        val imageId = java.util.UUID.randomUUID().toString().take(8)
-                        val baos = java.io.ByteArrayOutputStream()
+                        val imageId = UUID.randomUUID().toString().take(8)
+                        val baos = ByteArrayOutputStream()
                         bmp.compress(Bitmap.CompressFormat.JPEG, 90, baos)
                         chunks = buildImageChunks(imageId = imageId, jpegBytes = baos.toByteArray())
                     }
@@ -897,14 +912,14 @@ private fun ImageAdjustmentDialog(
                 scaledBitmap?.let {
                     Image(
                         bitmap = it.asImageBitmap(),
-                        contentDescription = "Image preview",
+                        contentDescription = stringResource(Res.string.image_adjustment_preview),
                         modifier = Modifier.fillMaxWidth().height(400.dp)
                     )
                 }
 
                 Spacer(modifier = Modifier.size(16.dp))
 
-                Text("Select maximum side length:")
+                Text(stringResource(Res.string.image_adjustment_select_max_side_length))
 
                 sizes.forEach { size ->
                     Row(
@@ -921,17 +936,32 @@ private fun ImageAdjustmentDialog(
 
                 Spacer(modifier = Modifier.size(16.dp))
 
-                Text("Number of chunks: ${chunks.size}")
+                Text(stringResource(Res.string.image_adjustment_chunk_delay))
+                Text(
+                    stringResource(Res.string.image_adjustment_chunk_delay_value, selectedChunkDelayMillis / 1000),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Slider(
+                    value = selectedChunkDelayMillis.toFloat(),
+                    onValueChange = { value ->
+                        onChunkDelayChange(value.toInt())
+                    },
+                    valueRange = MIN_IMAGE_CHUNK_DELAY_MILLIS.toFloat()..MAX_IMAGE_CHUNK_DELAY_MILLIS.toFloat(),
+                )
+
+                Spacer(modifier = Modifier.size(8.dp))
+
+                Text(stringResource(Res.string.image_adjustment_number_of_chunks, chunks.size))
 
                 Spacer(modifier = Modifier.size(16.dp))
 
                 Row {
                     Button(onClick = onCancel) {
-                        Text("Cancel")
+                        Text(stringResource(Res.string.cancel))
                     }
                     Spacer(modifier = Modifier.size(8.dp))
-                    Button(onClick = { onSend(chunks) }) {
-                        Text("Send")
+                    Button(onClick = { onSend(chunks, selectedChunkDelayMillis) }) {
+                        Text(stringResource(Res.string.send))
                     }
                 }
             }
@@ -984,6 +1014,7 @@ private fun MessageInput(
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
 
     var selectedSize by remember { mutableStateOf(128) }
+    var selectedChunkDelayMillis by remember { mutableStateOf(DEFAULT_IMAGE_CHUNK_DELAY_MILLIS) }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         selectedImageUri = uri
@@ -1002,7 +1033,7 @@ private fun MessageInput(
             IconButton(onClick = { showAttachmentMenu = true }) {
                 Icon(
                     imageVector = Icons.Filled.AttachFile,
-                    contentDescription = "Attachment",
+                    contentDescription = stringResource(Res.string.attachment),
                 )
             }
         },
@@ -1042,14 +1073,14 @@ private fun MessageInput(
         onDismissRequest = { showAttachmentMenu = false }
     ) {
         DropdownMenuItem(
-            text = { Text("Image") },
+            text = { Text(stringResource(Res.string.attach_image)) },
             onClick = { 
                 showAttachmentMenu = false
                 imagePickerLauncher.launch("image/*")
             }
         )
         DropdownMenuItem(
-            text = { Text("File") },
+            text = { Text(stringResource(Res.string.attach_file)) },
             onClick = { showAttachmentMenu = false }
         )
     }
@@ -1060,14 +1091,23 @@ private fun MessageInput(
         ImageAdjustmentDialog(
             imageUri = uri,
             selectedSize = selectedSize,
+            selectedChunkDelayMillis = selectedChunkDelayMillis,
             onSizeChange = { selectedSize = it },
-            onSend = { chunks ->
+            onChunkDelayChange = {
+                selectedChunkDelayMillis =
+                    it.coerceIn(MIN_IMAGE_CHUNK_DELAY_MILLIS, MAX_IMAGE_CHUNK_DELAY_MILLIS)
+            },
+            onSend = { chunks, delayMillis ->
                 selectedImageUri = null
                 coroutineScope.launch {
                     if (onSendChunk != null && chunks.isNotEmpty()) {
-                        for (chunk in chunks) {
+                        val boundedDelayMillis =
+                            delayMillis.coerceIn(MIN_IMAGE_CHUNK_DELAY_MILLIS, MAX_IMAGE_CHUNK_DELAY_MILLIS)
+                        chunks.forEachIndexed { index, chunk ->
                             onSendChunk(chunk)
-                            kotlinx.coroutines.delay(3000)
+                            if (index < chunks.lastIndex) {
+                                kotlinx.coroutines.delay(boundedDelayMillis.toLong())
+                            }
                         }
                     }
                 }
