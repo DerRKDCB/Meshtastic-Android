@@ -71,6 +71,7 @@ internal data class MessageListHandlers(
     val onDeleteMessages: (List<Long>) -> Unit,
     val onSendMessage: (String, String) -> Unit,
     val onReply: (Message?) -> Unit,
+    val onDecodeImage: (Message) -> Unit,
 )
 
 internal data class MessageListPagedState(
@@ -370,6 +371,7 @@ private fun RenderPagedChatMessageRow(
                 }
             }
         },
+        onDecodeImage = { handlers.onDecodeImage(message) },
         hasSamePrev = hasSamePrev,
         hasSameNext = hasSameNext,
         quickEmojis = quickEmojis,

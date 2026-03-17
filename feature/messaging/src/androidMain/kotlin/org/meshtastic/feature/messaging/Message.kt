@@ -275,6 +275,10 @@ fun MessageScreen(
                         }
                         selectedMessageIds.value = emptySet()
                     }
+                    is MessageScreenEvent.DecodeImage -> {
+                        // TODO: Implement image decoding logic
+                        // For now, just show a placeholder
+                    }
                 }
             }
 
@@ -416,6 +420,7 @@ fun MessageScreen(
                     onDeleteMessages = { viewModel.deleteMessages(it) },
                     onSendMessage = { text, key -> viewModel.sendMessage(text, key) },
                     onReply = { message -> replyingToPacketId = message?.packetId },
+                    onDecodeImage = { onEvent(MessageScreenEvent.DecodeImage(it)) },
                 ),
                 quickEmojis = viewModel.frequentEmojis,
             )
