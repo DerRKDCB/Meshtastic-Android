@@ -481,6 +481,8 @@
     <string name="decode_image_no_matching_chunks">No matching image chunks were found.</string>
     <string name="decode_image_missing_chunks">Missing chunks. Found %1$d of %2$d.</string>
     <string name="decode_image_failed">Unable to decode image.</string>
+    <string name="decode_image_saved">Image saved to gallery.</string>
+    <string name="decode_image_save_failed">Failed to save image to gallery.</string>
     <string name="decode_image_id">Image ID: %1$s</string>
     <string name="alert_bell_text">Alert Bell Character!</string>
     <string name="critical_alert">Critical Alert!</string>

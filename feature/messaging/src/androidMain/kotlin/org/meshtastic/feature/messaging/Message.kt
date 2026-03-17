@@ -19,9 +19,12 @@
 package org.meshtastic.feature.messaging
 
 import android.content.ClipData
+import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
@@ -107,8 +110,11 @@ import org.meshtastic.core.resources.decode_image_failed
 import org.meshtastic.core.resources.decode_image_id
 import org.meshtastic.core.resources.decode_image_missing_chunks
 import org.meshtastic.core.resources.decode_image_no_matching_chunks
+import org.meshtastic.core.resources.decode_image_save_failed
+import org.meshtastic.core.resources.decode_image_saved
 import org.meshtastic.core.resources.decode_image_searching
 import org.meshtastic.core.resources.message_input_label
+import org.meshtastic.core.resources.save
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.type_a_message
 import org.meshtastic.core.resources.unknown_channel
@@ -631,6 +637,46 @@ private fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: I
     return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
 }
 
+private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap, imageId: String?): Boolean {
+    val now = System.currentTimeMillis()
+    val displayName =
+        if (imageId.isNullOrBlank()) {
+            "meshtastic_$now.jpg"
+        } else {
+            "meshtastic_${imageId}_$now.jpg"
+        }
+    val values =
+        ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Meshtastic")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+
+    val resolver = context.contentResolver
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+    return runCatching {
+        resolver.openOutputStream(uri)?.use { output ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)
+        } ?: false
+    }
+        .getOrElse {
+            resolver.delete(uri, null, null)
+            false
+        }
+        .also { success ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val pendingValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                resolver.update(uri, pendingValues, null, null)
+            }
+            if (!success) {
+                resolver.delete(uri, null, null)
+            }
+        }
+}
+
 private fun buildImageChunks(imageId: String, jpegBytes: ByteArray, maxChunkLength: Int = IMAGE_CHUNK_MAX_LENGTH): List<String> {
     val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
     if (base64.isEmpty()) return emptyList()
@@ -664,6 +710,11 @@ private fun buildImageChunks(imageId: String, jpegBytes: ByteArray, maxChunkLeng
 
 @Composable
 private fun DecodeImageDialog(state: DecodeImageUiState, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val dialogScope = rememberCoroutineScope()
+    var isSaving by remember { mutableStateOf(false) }
+    var saveResultMessageRes by remember { mutableStateOf<org.jetbrains.compose.resources.StringResource?>(null) }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(8.dp),
@@ -732,7 +783,40 @@ private fun DecodeImageDialog(state: DecodeImageUiState, onDismiss: () -> Unit) 
                     )
                 }
 
+                saveResultMessageRes?.let { messageRes ->
+                    Text(
+                        text = stringResource(messageRes),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    if (state.decodedBitmap != null) {
+                        TextButton(
+                            onClick = {
+                                if (isSaving) return@TextButton
+                                isSaving = true
+                                saveResultMessageRes = null
+                                dialogScope.launch {
+                                    val success =
+                                        withContext(Dispatchers.IO) {
+                                            saveBitmapToGallery(context, state.decodedBitmap, state.imageId)
+                                        }
+                                    saveResultMessageRes =
+                                        if (success) {
+                                            Res.string.decode_image_saved
+                                        } else {
+                                            Res.string.decode_image_save_failed
+                                        }
+                                    isSaving = false
+                                }
+                            },
+                            enabled = !isSaving,
+                        ) {
+                            Text(stringResource(Res.string.save))
+                        }
+                    }
                     TextButton(onClick = onDismiss) {
                         Text(stringResource(Res.string.close))
                     }
