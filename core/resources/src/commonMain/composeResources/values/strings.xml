@@ -476,6 +476,12 @@
     <string name="unknown_age">Unknown Age</string>
     <string name="copy">Copy</string>
     <string name="decode_image">Decode Image</string>
+    <string name="decode_image_searching">Searching chat history…</string>
+    <string name="decode_image_chunks_found">Chunks found: %1$d/%2$d</string>
+    <string name="decode_image_no_matching_chunks">No matching image chunks were found.</string>
+    <string name="decode_image_missing_chunks">Missing chunks. Found %1$d of %2$d.</string>
+    <string name="decode_image_failed">Unable to decode image.</string>
+    <string name="decode_image_id">Image ID: %1$s</string>
     <string name="alert_bell_text">Alert Bell Character!</string>
     <string name="critical_alert">Critical Alert!</string>
     <string name="favorite">Favorite</string>

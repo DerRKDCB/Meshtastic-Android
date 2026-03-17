@@ -74,12 +74,7 @@ import org.meshtastic.core.ui.icon.Hops
 import org.meshtastic.core.ui.icon.MeshtasticIcons
 import org.meshtastic.core.ui.theme.MessageItemColors
 import org.meshtastic.core.ui.util.createClipEntry
-
-private fun Message.isImageChunk(): Boolean {
-    val result = text.matches(Regex("^IMG:[^|]+\\|PART:\\d+/\\d+\\|DATA:.+$"))
-    println("isImageChunk for '${text.take(50)}...': $result")
-    return result
-}
+import org.meshtastic.feature.messaging.isImageChunkMessage
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Suppress("LongMethod", "CyclomaticComplexMethod")
@@ -163,7 +158,7 @@ fun MessageItem(
                             null
                         },
                         onStatus = onStatusClick,
-                        isImageChunk = true, // message.isImageChunk(),
+                        isImageChunk = message.isImageChunkMessage(),
                         onDecodeImage = { onDecodeImage(); activeSheet = null },
                     )
                 }

@@ -62,14 +62,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.ui.window.Dialog
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -93,9 +96,18 @@ import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.common.util.HomoglyphCharacterStringTransformer
 import org.meshtastic.core.database.entity.QuickChatAction
 import org.meshtastic.core.model.DataPacket
+import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.util.getChannel
 import org.meshtastic.core.resources.Res
+import org.meshtastic.core.resources.close
+import org.meshtastic.core.resources.decode_image
+import org.meshtastic.core.resources.decode_image_chunks_found
+import org.meshtastic.core.resources.decode_image_failed
+import org.meshtastic.core.resources.decode_image_id
+import org.meshtastic.core.resources.decode_image_missing_chunks
+import org.meshtastic.core.resources.decode_image_no_matching_chunks
+import org.meshtastic.core.resources.decode_image_searching
 import org.meshtastic.core.resources.message_input_label
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.type_a_message
@@ -115,6 +127,30 @@ import java.nio.charset.StandardCharsets
 
 private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
+private const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
+
+private data class DecodeImageUiState(
+    val visible: Boolean = false,
+    val imageId: String? = null,
+    val foundChunks: Int = 0,
+    val totalChunks: Int = 0,
+    val isSearching: Boolean = false,
+    val decodedBitmap: Bitmap? = null,
+    val error: DecodeImageError? = null,
+)
+
+private sealed interface DecodeImageError {
+    data object NoMatchingChunks : DecodeImageError
+
+    data class MissingChunks(val found: Int, val total: Int) : DecodeImageError
+
+    data object DecodeFailed : DecodeImageError
+}
+
+private data class ImageChunkScanResult(
+    val partsByIndex: Map<Int, String>,
+    val totalParts: Int,
+)
 
 /**
  * The main screen for displaying and sending messages to a contact or channel.
@@ -154,6 +190,7 @@ fun MessageScreen(
     var sharedContact by rememberSaveable { mutableStateOf<Node?>(null) }
     val selectedMessageIds = rememberSaveable { mutableStateOf(emptySet<Long>()) }
     val messageInputState = rememberTextFieldState(message)
+    var decodeImageUiState by remember { mutableStateOf(DecodeImageUiState()) }
     val showQuickChat by viewModel.showQuickChat.collectAsStateWithLifecycle()
     val filteredCount by viewModel.filteredCount.collectAsStateWithLifecycle()
     val showFiltered by viewModel.showFiltered.collectAsStateWithLifecycle()
@@ -276,8 +313,103 @@ fun MessageScreen(
                         selectedMessageIds.value = emptySet()
                     }
                     is MessageScreenEvent.DecodeImage -> {
-                        // TODO: Implement image decoding logic
-                        // For now, just show a placeholder
+                        val seedChunk = parseImageChunk(event.message.text)
+                        if (seedChunk == null) {
+                            decodeImageUiState =
+                                DecodeImageUiState(visible = true, isSearching = false, error = DecodeImageError.DecodeFailed)
+                            return
+                        }
+
+                        decodeImageUiState =
+                            DecodeImageUiState(
+                                visible = true,
+                                imageId = seedChunk.imageId,
+                                foundChunks = 1,
+                                totalChunks = seedChunk.totalParts,
+                                isSearching = true,
+                            )
+
+                        coroutineScope.launch {
+                            runCatching {
+                                val allMessages = viewModel.getMessagesFlow(contactKey, limit = null).first()
+                                val scanResult =
+                                    scanImageChunks(
+                                        seedChunk = seedChunk,
+                                        messages = allMessages,
+                                        onProgress = { found, total ->
+                                            decodeImageUiState =
+                                                decodeImageUiState.copy(
+                                                    foundChunks = found,
+                                                    totalChunks = total,
+                                                    isSearching = true,
+                                                    error = null,
+                                                )
+                                        },
+                                    )
+
+                                val decodedBitmap =
+                                    withContext(Dispatchers.Default) {
+                                        decodeBitmapFromChunks(
+                                            partsByIndex = scanResult.partsByIndex,
+                                            totalParts = scanResult.totalParts,
+                                        )
+                                    }
+                                val foundChunks = scanResult.partsByIndex.size
+                                val totalChunks = scanResult.totalParts
+                                val missingCount =
+                                    (1..totalChunks).count { index -> !scanResult.partsByIndex.containsKey(index) }
+
+                                decodeImageUiState =
+                                    when {
+                                        decodedBitmap != null -> {
+                                            decodeImageUiState.copy(
+                                                isSearching = false,
+                                                decodedBitmap = decodedBitmap,
+                                                error = null,
+                                                foundChunks = foundChunks,
+                                                totalChunks = totalChunks,
+                                            )
+                                        }
+
+                                        foundChunks == 0 -> {
+                                            decodeImageUiState.copy(
+                                                isSearching = false,
+                                                decodedBitmap = null,
+                                                error = DecodeImageError.NoMatchingChunks,
+                                                foundChunks = foundChunks,
+                                                totalChunks = totalChunks,
+                                            )
+                                        }
+
+                                        missingCount > 0 -> {
+                                            decodeImageUiState.copy(
+                                                isSearching = false,
+                                                decodedBitmap = null,
+                                                error = DecodeImageError.MissingChunks(foundChunks, totalChunks),
+                                                foundChunks = foundChunks,
+                                                totalChunks = totalChunks,
+                                            )
+                                        }
+
+                                        else -> {
+                                            decodeImageUiState.copy(
+                                                isSearching = false,
+                                                decodedBitmap = null,
+                                                error = DecodeImageError.DecodeFailed,
+                                                foundChunks = foundChunks,
+                                                totalChunks = totalChunks,
+                                            )
+                                        }
+                                    }
+                            }.onFailure {
+                                decodeImageUiState =
+                                    decodeImageUiState.copy(
+                                        isSearching = false,
+                                        decodedBitmap = null,
+                                        error = DecodeImageError.DecodeFailed,
+                                    )
+                            }
+                        }
                     }
                 }
             }
@@ -294,6 +426,13 @@ fun MessageScreen(
     }
 
     sharedContact?.let { contact -> SharedContactDialog(contact = contact, onDismiss = { sharedContact = null }) }
+
+    if (decodeImageUiState.visible) {
+        DecodeImageDialog(
+            state = decodeImageUiState,
+            onDismiss = { decodeImageUiState = DecodeImageUiState() },
+        )
+    }
 
     val originalMessage by
         remember(replyingToPacketId, pagedMessages.itemCount) {
@@ -427,6 +566,140 @@ fun MessageScreen(
             // Show FAB if we can scroll towards the newest messages (index 0).
             if (listState.canScrollBackward) {
                 ScrollToBottomFab(coroutineScope, listState, unreadCount)
+            }
+        }
+    }
+}
+
+private fun scanImageChunks(
+    seedChunk: ImageChunk,
+    messages: List<Message>,
+    onProgress: (foundChunks: Int, totalChunks: Int) -> Unit,
+): ImageChunkScanResult {
+    var totalParts = seedChunk.totalParts
+    val partsByIndex = mutableMapOf(seedChunk.partIndex to seedChunk.payload)
+    var earliestFoundChunkTime: Long? = null
+    var searchLowerBoundInclusive = Long.MIN_VALUE
+
+    onProgress(partsByIndex.size, totalParts)
+
+    for (historyMessage in messages) {
+        if (earliestFoundChunkTime != null && historyMessage.receivedTime < searchLowerBoundInclusive) {
+            break
+        }
+
+        val parsedChunk = parseImageChunk(historyMessage.text) ?: continue
+        if (parsedChunk.imageId != seedChunk.imageId) continue
+
+        if (parsedChunk.totalParts > totalParts) {
+            totalParts = parsedChunk.totalParts
+        }
+
+        if (earliestFoundChunkTime == null || historyMessage.receivedTime < earliestFoundChunkTime) {
+            earliestFoundChunkTime = historyMessage.receivedTime
+            searchLowerBoundInclusive = historyMessage.receivedTime - IMAGE_HISTORY_SCAN_WINDOW_MILLIS
+        }
+
+        val wasAdded = partsByIndex.putIfAbsent(parsedChunk.partIndex, parsedChunk.payload) == null
+        if (wasAdded) {
+            onProgress(partsByIndex.size, totalParts)
+        }
+
+        if (partsByIndex.size >= totalParts) {
+            break
+        }
+    }
+
+    return ImageChunkScanResult(partsByIndex = partsByIndex, totalParts = totalParts)
+}
+
+private fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: Int): Bitmap? {
+    if (totalParts <= 0 || partsByIndex.isEmpty()) return null
+    val payload =
+        (1..totalParts)
+            .mapNotNull { partIndex -> partsByIndex[partIndex] }
+            .joinToString(separator = "")
+            .trim()
+    if (payload.isEmpty()) return null
+    val imageBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+}
+
+@Composable
+private fun DecodeImageDialog(state: DecodeImageUiState, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f).padding(16.dp),
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(text = stringResource(Res.string.decode_image), style = MaterialTheme.typography.titleMedium)
+
+                state.imageId?.let { imageId ->
+                    Text(
+                        text = stringResource(Res.string.decode_image_id, imageId),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+
+                if (state.isSearching) {
+                    val progress =
+                        if (state.totalChunks > 0) {
+                            (state.foundChunks.toFloat() / state.totalChunks.toFloat()).coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        }
+                    if (state.totalChunks > 0) {
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+
+                Text(
+                    text =
+                        if (state.totalChunks > 0) {
+                            stringResource(
+                                Res.string.decode_image_chunks_found,
+                                state.foundChunks,
+                                state.totalChunks,
+                            )
+                        } else {
+                            stringResource(Res.string.decode_image_searching)
+                        },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+
+                state.error?.let { error ->
+                    val errorText =
+                        when (error) {
+                            DecodeImageError.NoMatchingChunks -> stringResource(Res.string.decode_image_no_matching_chunks)
+                            is DecodeImageError.MissingChunks ->
+                                stringResource(Res.string.decode_image_missing_chunks, error.found, error.total)
+                            DecodeImageError.DecodeFailed -> stringResource(Res.string.decode_image_failed)
+                        }
+                    Text(text = errorText, color = MaterialTheme.colorScheme.error)
+                }
+
+                state.decodedBitmap?.let { bitmap ->
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = stringResource(Res.string.decode_image),
+                        modifier = Modifier.fillMaxWidth().weight(1f, fill = true),
+                    )
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) {
+                        Text(stringResource(Res.string.close))
+                    }
+                }
             }
         }
     }

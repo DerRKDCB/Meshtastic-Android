@@ -97,7 +97,6 @@ fun MessageActionsContent(
         )
 
         if (isImageChunk) {
-            println("Adding decode image option")
             ListItem(
                 headlineContent = { Text(stringResource(Res.string.decode_image)) },
                 leadingContent = { Icon(Icons.Rounded.Image, contentDescription = stringResource(Res.string.decode_image)) },
