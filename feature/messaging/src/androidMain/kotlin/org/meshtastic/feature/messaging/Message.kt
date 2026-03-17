@@ -128,6 +128,7 @@ import java.nio.charset.StandardCharsets
 private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
 private const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
+private const val IMAGE_CHUNK_MAX_LENGTH = 175
 
 private data class DecodeImageUiState(
     val visible: Boolean = false,
@@ -347,6 +348,34 @@ fun MessageScreen(
                                         },
                                     )
 
+                                val foundChunks = scanResult.partsByIndex.size
+                                val totalChunks = scanResult.totalParts
+                                val missingCount = (1..totalChunks).count { index -> !scanResult.partsByIndex.containsKey(index) }
+
+                                if (foundChunks == 0) {
+                                    decodeImageUiState =
+                                        decodeImageUiState.copy(
+                                            isSearching = false,
+                                            decodedBitmap = null,
+                                            error = DecodeImageError.NoMatchingChunks,
+                                            foundChunks = foundChunks,
+                                            totalChunks = totalChunks,
+                                        )
+                                    return@runCatching
+                                }
+
+                                if (missingCount > 0) {
+                                    decodeImageUiState =
+                                        decodeImageUiState.copy(
+                                            isSearching = false,
+                                            decodedBitmap = null,
+                                            error = DecodeImageError.MissingChunks(foundChunks, totalChunks),
+                                            foundChunks = foundChunks,
+                                            totalChunks = totalChunks,
+                                        )
+                                    return@runCatching
+                                }
+
                                 val decodedBitmap =
                                     withContext(Dispatchers.Default) {
                                         decodeBitmapFromChunks(
@@ -354,10 +383,6 @@ fun MessageScreen(
                                             totalParts = scanResult.totalParts,
                                         )
                                     }
-                                val foundChunks = scanResult.partsByIndex.size
-                                val totalChunks = scanResult.totalParts
-                                val missingCount =
-                                    (1..totalChunks).count { index -> !scanResult.partsByIndex.containsKey(index) }
 
                                 decodeImageUiState =
                                     when {
@@ -366,26 +391,6 @@ fun MessageScreen(
                                                 isSearching = false,
                                                 decodedBitmap = decodedBitmap,
                                                 error = null,
-                                                foundChunks = foundChunks,
-                                                totalChunks = totalChunks,
-                                            )
-                                        }
-
-                                        foundChunks == 0 -> {
-                                            decodeImageUiState.copy(
-                                                isSearching = false,
-                                                decodedBitmap = null,
-                                                error = DecodeImageError.NoMatchingChunks,
-                                                foundChunks = foundChunks,
-                                                totalChunks = totalChunks,
-                                            )
-                                        }
-
-                                        missingCount > 0 -> {
-                                            decodeImageUiState.copy(
-                                                isSearching = false,
-                                                decodedBitmap = null,
-                                                error = DecodeImageError.MissingChunks(foundChunks, totalChunks),
                                                 foundChunks = foundChunks,
                                                 totalChunks = totalChunks,
                                             )
@@ -615,14 +620,46 @@ private fun scanImageChunks(
 
 private fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: Int): Bitmap? {
     if (totalParts <= 0 || partsByIndex.isEmpty()) return null
+    if ((1..totalParts).any { partIndex -> !partsByIndex.containsKey(partIndex) }) return null
     val payload =
         (1..totalParts)
             .mapNotNull { partIndex -> partsByIndex[partIndex] }
             .joinToString(separator = "")
-            .trim()
+            .replace(Regex("\\s+"), "")
     if (payload.isEmpty()) return null
     val imageBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
     return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+}
+
+private fun buildImageChunks(imageId: String, jpegBytes: ByteArray, maxChunkLength: Int = IMAGE_CHUNK_MAX_LENGTH): List<String> {
+    val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+    if (base64.isEmpty()) return emptyList()
+
+    var totalPartsGuess = 1
+    repeat(6) {
+        val chunks = mutableListOf<String>()
+        var cursor = 0
+        var partIndex = 1
+
+        while (cursor < base64.length) {
+            val header = "IMG:$imageId|PART:$partIndex/$totalPartsGuess|DATA:"
+            val maxDataLength = maxChunkLength - header.length
+            if (maxDataLength <= 0) return emptyList()
+
+            val nextCursor = (cursor + maxDataLength).coerceAtMost(base64.length)
+            chunks += "$header${base64.substring(cursor, nextCursor)}"
+            cursor = nextCursor
+            partIndex++
+        }
+
+        val actualParts = chunks.size
+        if (actualParts == totalPartsGuess) {
+            return chunks
+        }
+        totalPartsGuess = actualParts
+    }
+
+    return emptyList()
 }
 
 @Composable
@@ -756,15 +793,7 @@ private fun ImageAdjustmentDialog(
                         val imageId = java.util.UUID.randomUUID().toString().take(8)
                         val baos = java.io.ByteArrayOutputStream()
                         bmp.compress(Bitmap.CompressFormat.JPEG, 90, baos)
-                        val base64 = android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.DEFAULT)
-                        val chunkSize = 175
-                        val headerTemplate = "IMG:$imageId|PART:xx/xx|DATA:"
-                        val maxDataLen = chunkSize - headerTemplate.length
-                        val dataChunks = base64.chunked(maxDataLen)
-                        val totalParts = dataChunks.size
-                        chunks = dataChunks.mapIndexed { index, chunk ->
-                            "IMG:$imageId|PART:${index + 1}/$totalParts|DATA:$chunk"
-                        }
+                        chunks = buildImageChunks(imageId = imageId, jpegBytes = baos.toByteArray())
                     }
                 }
             }
