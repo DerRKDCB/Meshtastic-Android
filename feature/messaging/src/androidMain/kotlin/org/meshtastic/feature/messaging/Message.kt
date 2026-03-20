@@ -82,6 +82,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.Composable
@@ -1107,6 +1108,8 @@ private fun ImageAdjustmentDialog(
     var selectedJpegQuality by remember { mutableStateOf(0) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chunks by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
+    var scaledBitmapRequestId by remember(imageUri) { mutableStateOf(0) }
+    var previewComputationRequestId by remember(imageUri) { mutableStateOf(0) }
     val regionMaxDutyCyclePercent = maxDutyCyclePercentForRegion(loraConfig.region)
     val boundedDutyCyclePercent = selectedDutyCyclePercent.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, regionMaxDutyCyclePercent)
     var minTransmissionSeconds by remember { mutableStateOf(0f) }
@@ -1161,16 +1164,25 @@ private fun ImageAdjustmentDialog(
     }
 
     LaunchedEffect(imageUri, selectedSize) {
-        withContext(Dispatchers.IO) {
-            context.contentResolver.openInputStream(imageUri)?.use { input ->
-                val original: Bitmap? = BitmapFactory.decodeStream(input)
-                original?.let {
-                    val ratio = minOf(selectedSize.toFloat() / it.width, selectedSize.toFloat() / it.height)
-                    val newWidth = (it.width * ratio).toInt()
-                    val newHeight = (it.height * ratio).toInt()
-                    scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
+        val requestId = ++scaledBitmapRequestId
+        try {
+            val computedScaledBitmap =
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(imageUri)?.use { input ->
+                        val original: Bitmap? = BitmapFactory.decodeStream(input)
+                        original?.let {
+                            val ratio = minOf(selectedSize.toFloat() / it.width, selectedSize.toFloat() / it.height)
+                            val newWidth = (it.width * ratio).toInt()
+                            val newHeight = (it.height * ratio).toInt()
+                            Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
+                        }
+                    }
                 }
+            if (requestId == scaledBitmapRequestId) {
+                scaledBitmap = computedScaledBitmap
             }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         }
     }
 
@@ -1183,77 +1195,106 @@ private fun ImageAdjustmentDialog(
         selectedMaxTransmissionTimeSeconds,
     ) {
         val bitmap = scaledBitmap ?: return@LaunchedEffect
-        withContext(Dispatchers.IO) {
-            val chunksAtQuality0 = buildChunksForQuality(bitmap, 0)
-            val chunksAtQuality90 = buildChunksForQuality(bitmap, MAX_AUTO_IMAGE_JPEG_QUALITY)
-            val transmissionSecondsAt0 =
-                estimateTransmissionMillisForChunks(chunksAtQuality0, boundedDutyCyclePercent, loraConfig) / 1000f
-            val transmissionSecondsAt90 =
-                estimateTransmissionMillisForChunks(chunksAtQuality90, boundedDutyCyclePercent, loraConfig) / 1000f
-            val minSeconds = minOf(transmissionSecondsAt0, transmissionSecondsAt90)
-            val maxSeconds = maxOf(transmissionSecondsAt0, transmissionSecondsAt90)
+        val requestId = ++previewComputationRequestId
+        try {
+            data class PreviewComputationResult(
+                val minSeconds: Float,
+                val maxSeconds: Float,
+                val snappedSelectedSeconds: Float,
+                val bestQuality: Int,
+                val bestChunks: List<ByteArray>,
+                val decodedPreview: Bitmap?,
+            )
 
-            minTransmissionSeconds = minSeconds
-            maxTransmissionSeconds = maxSeconds
+            val result =
+                withContext(Dispatchers.IO) {
+                    val chunksAtQuality0 = buildChunksForQuality(bitmap, 0)
+                    val chunksAtQuality90 = buildChunksForQuality(bitmap, MAX_AUTO_IMAGE_JPEG_QUALITY)
+                    val transmissionSecondsAt0 =
+                        estimateTransmissionMillisForChunks(chunksAtQuality0, boundedDutyCyclePercent, loraConfig) / 1000f
+                    val transmissionSecondsAt90 =
+                        estimateTransmissionMillisForChunks(chunksAtQuality90, boundedDutyCyclePercent, loraConfig) / 1000f
+                    val minSeconds = minOf(transmissionSecondsAt0, transmissionSecondsAt90)
+                    val maxSeconds = maxOf(transmissionSecondsAt0, transmissionSecondsAt90)
 
-            val snappedSelectedSeconds =
-                if (selectedMaxTransmissionTimeSeconds <= 0f) {
-                    minSeconds
-                } else {
-                    transmissionSecondsFromSliderPosition(
-                        snapTransmissionSliderPosition(
-                            normalizeTransmissionSliderPosition(
-                                selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                    val snappedSelectedSeconds =
+                        if (selectedMaxTransmissionTimeSeconds <= 0f) {
+                            minSeconds
+                        } else {
+                            transmissionSecondsFromSliderPosition(
+                                snapTransmissionSliderPosition(
+                                    normalizeTransmissionSliderPosition(
+                                        selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                                        minSeconds,
+                                        maxSeconds,
+                                    )
+                                ),
                                 minSeconds,
                                 maxSeconds,
                             )
-                        ),
-                        minSeconds,
-                        maxSeconds,
-                    )
-                }
-            if (selectedMaxTransmissionTimeSeconds != snappedSelectedSeconds) {
-                onMaxTransmissionTimeChange(snappedSelectedSeconds)
-            }
+                        }
 
-            val targetSeconds =
-                if (selectedMaxTransmissionTimeSeconds <= 0f) {
-                    minSeconds
-                } else {
-                    transmissionSecondsFromSliderPosition(
-                        snapTransmissionSliderPosition(
-                            normalizeTransmissionSliderPosition(
-                                selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                    val targetSeconds =
+                        if (selectedMaxTransmissionTimeSeconds <= 0f) {
+                            minSeconds
+                        } else {
+                            transmissionSecondsFromSliderPosition(
+                                snapTransmissionSliderPosition(
+                                    normalizeTransmissionSliderPosition(
+                                        selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                                        minSeconds,
+                                        maxSeconds,
+                                    )
+                                ),
                                 minSeconds,
                                 maxSeconds,
                             )
-                        ),
-                        minSeconds,
-                        maxSeconds,
-                    )
-                }
+                        }
 
-            var bestQuality = 0
-            var bestChunks = chunksAtQuality0
-            for (quality in MAX_AUTO_IMAGE_JPEG_QUALITY downTo 0) {
-                val candidateChunks =
-                    when (quality) {
-                        0 -> chunksAtQuality0
-                        MAX_AUTO_IMAGE_JPEG_QUALITY -> chunksAtQuality90
-                        else -> buildChunksForQuality(bitmap, quality)
+                    var bestQuality = 0
+                    var bestChunks = chunksAtQuality0
+                    for (quality in MAX_AUTO_IMAGE_JPEG_QUALITY downTo 0) {
+                        val candidateChunks =
+                            when (quality) {
+                                0 -> chunksAtQuality0
+                                MAX_AUTO_IMAGE_JPEG_QUALITY -> chunksAtQuality90
+                                else -> buildChunksForQuality(bitmap, quality)
+                            }
+                        val candidateSeconds =
+                            estimateTransmissionMillisForChunks(candidateChunks, boundedDutyCyclePercent, loraConfig) / 1000f
+                        if (candidateSeconds <= targetSeconds) {
+                            bestQuality = quality
+                            bestChunks = candidateChunks
+                            break
+                        }
                     }
-                val candidateSeconds =
-                    estimateTransmissionMillisForChunks(candidateChunks, boundedDutyCyclePercent, loraConfig) / 1000f
-                if (candidateSeconds <= targetSeconds) {
-                    bestQuality = quality
-                    bestChunks = candidateChunks
-                    break
+
+                    PreviewComputationResult(
+                        minSeconds = minSeconds,
+                        maxSeconds = maxSeconds,
+                        snappedSelectedSeconds = snappedSelectedSeconds,
+                        bestQuality = bestQuality,
+                        bestChunks = bestChunks,
+                        decodedPreview = decodeBitmapFromOutgoingChunkedPayloads(bestChunks),
+                    )
                 }
+
+            if (requestId != previewComputationRequestId) {
+                return@LaunchedEffect
             }
 
-            selectedJpegQuality = bestQuality
-            chunks = bestChunks
-            previewBitmap = decodeBitmapFromOutgoingChunkedPayloads(bestChunks)
+            minTransmissionSeconds = result.minSeconds
+            maxTransmissionSeconds = result.maxSeconds
+
+            if (selectedMaxTransmissionTimeSeconds != result.snappedSelectedSeconds) {
+                onMaxTransmissionTimeChange(result.snappedSelectedSeconds)
+            }
+
+            selectedJpegQuality = result.bestQuality
+            chunks = result.bestChunks
+            previewBitmap = result.decodedPreview
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         }
     }
 
