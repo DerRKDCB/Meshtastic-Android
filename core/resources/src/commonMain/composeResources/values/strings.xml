@@ -211,6 +211,7 @@
     <string name="image_adjustment_results">Results</string>
     <string name="image_adjustment_result_line_primary">Chunks %1$d • JPEG %2$s • TX %3$s</string>
     <string name="image_adjustment_result_line_secondary">Int %1$s • Pkt TOA %2$s • TOA %3$s • Duty %4$s</string>
+    <string name="image_timeline_chunk_progress">Chunks available: %1$d/%2$d</string>
     <string name="image_adjustment_milliseconds_value">%1$d ms</string>
     <string name="image_adjustment_number_of_chunks">Number of chunks: %1$d</string>
     <string name="image_adjustment_estimated_transmission_time">Estimated transmission time: %1$s</string>

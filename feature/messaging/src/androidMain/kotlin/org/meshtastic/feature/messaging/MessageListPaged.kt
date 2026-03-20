@@ -16,17 +16,29 @@
  */
 package org.meshtastic.feature.messaging
 
+import android.content.ContentValues
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
+import android.provider.MediaStore
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -45,8 +57,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.LoadState
@@ -54,10 +68,19 @@ import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.itemContentType
 import androidx.paging.compose.itemKey
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.jetbrains.compose.resources.stringResource
+import org.meshtastic.core.resources.Res
+import org.meshtastic.core.resources.close
+import org.meshtastic.core.resources.decode_image_save_failed
+import org.meshtastic.core.resources.decode_image_saved
+import org.meshtastic.core.resources.image_timeline_chunk_progress
+import org.meshtastic.core.resources.save
 import org.meshtastic.proto.PortNum
 import java.io.ByteArrayOutputStream
 import java.io.ByteArrayInputStream
@@ -72,8 +95,14 @@ import org.meshtastic.feature.messaging.component.ReactionDialog
 import org.meshtastic.feature.messaging.component.UnreadMessagesDivider
 
 private data class TimelinePrivateImageRenderState(
-    val imageByMessageUuid: Map<Long, ImageBitmap>,
+    val imageByMessageUuid: Map<Long, TimelinePrivateImageMessageData>,
     val hiddenChunkMessageUuids: Set<Long>,
+)
+
+private data class TimelinePrivateImageMessageData(
+    val bitmap: Bitmap?,
+    val availableChunks: Int,
+    val totalChunks: Int,
 )
 
 private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
@@ -115,32 +144,30 @@ private fun buildPrivateImageRenderState(messages: List<Message>): TimelinePriva
         return TimelinePrivateImageRenderState(emptyMap(), emptySet())
     }
 
-    val imageByMessageUuid = mutableMapOf<Long, ImageBitmap>()
+    val imageByMessageUuid = mutableMapOf<Long, TimelinePrivateImageMessageData>()
     val hiddenChunkMessageUuids = mutableSetOf<Long>()
 
     chunkMessages.groupBy { it.payloadId }.values.forEach { group ->
         val expectedCount = group.firstOrNull()?.count ?: return@forEach
         val chunksByIndex = group.associateBy { it.index }
-        val hasCompletePayload = (1..expectedCount).all { chunkIndex -> chunksByIndex.containsKey(chunkIndex) }
-        if (!hasCompletePayload) {
-            return@forEach
-        }
-
         val payloadBytes =
             ByteArrayOutputStream().use { output ->
-                (1..expectedCount)
+                chunksByIndex.keys.sorted()
                     .mapNotNull { chunkIndex -> chunksByIndex[chunkIndex]?.bytes }
                     .forEach { chunkBytes -> output.write(chunkBytes) }
                 output.toByteArray()
             }
         val imageBytes = maybeGunzip(payloadBytes)
         val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-        if (bitmap != null) {
-            val renderedMessage = group.maxByOrNull { it.index }?.message
-            if (renderedMessage != null) {
-                imageByMessageUuid[renderedMessage.uuid] = bitmap.asImageBitmap()
-                group.filter { it.message.uuid != renderedMessage.uuid }.forEach { hiddenChunkMessageUuids += it.message.uuid }
-            }
+        val renderedMessage = group.maxByOrNull { it.index }?.message
+        if (renderedMessage != null) {
+            imageByMessageUuid[renderedMessage.uuid] =
+                TimelinePrivateImageMessageData(
+                    bitmap = bitmap,
+                    availableChunks = chunksByIndex.size,
+                    totalChunks = expectedCount,
+                )
+            group.filter { it.message.uuid != renderedMessage.uuid }.forEach { hiddenChunkMessageUuids += it.message.uuid }
         }
     }
 
@@ -188,6 +215,7 @@ internal fun MessageListPaged(
     quickEmojis: List<String> = emptyList(),
 ) {
     val haptics = LocalHapticFeedback.current
+    val context = LocalContext.current
     val inSelectionMode by remember { derivedStateOf { state.selectedIds.value.isNotEmpty() } }
 
     // Optimization: Pre-calculate map for O(1) lookup in list items to avoid O(N) linear search during scrolling.
@@ -225,6 +253,55 @@ internal fun MessageListPaged(
     }
 
     val coroutineScope = rememberCoroutineScope()
+    var expandedImage by remember { mutableStateOf<Bitmap?>(null) }
+    var saveResultMessageRes by remember { mutableStateOf<org.jetbrains.compose.resources.StringResource?>(null) }
+
+    expandedImage?.let { bitmap ->
+        Dialog(onDismissRequest = { expandedImage = null }) {
+            Surface(modifier = Modifier.fillMaxWidth().fillMaxHeight(0.92f).padding(16.dp)) {
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Expanded image",
+                        modifier = Modifier.fillMaxWidth().weight(1f, fill = true),
+                    )
+
+                    saveResultMessageRes?.let { messageRes ->
+                        Text(text = stringResource(messageRes))
+                    }
+
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                        ) {
+                            Button(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        val success = withContext(Dispatchers.IO) { saveBitmapToGallery(context, bitmap) }
+                                        saveResultMessageRes =
+                                            if (success) {
+                                                Res.string.decode_image_saved
+                                            } else {
+                                                Res.string.decode_image_save_failed
+                                            }
+                                    }
+                                },
+                            ) {
+                                Text(stringResource(Res.string.save))
+                            }
+                            TextButton(onClick = { expandedImage = null }) {
+                                Text(stringResource(Res.string.close))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Disable auto-scroll when any dialog is open to prevent list jumping
     val hasDialogOpen = showStatusDialog != null || showReactionDialog != null
@@ -250,6 +327,10 @@ internal fun MessageListPaged(
         haptics = haptics,
         onShowStatusDialog = { showStatusDialog = it },
         onShowReactions = { showReactionDialog = it },
+        onInlineImageClick = { bitmap ->
+            expandedImage = bitmap
+            saveResultMessageRes = null
+        },
         modifier = modifier,
         quickEmojis = quickEmojis,
     )
@@ -267,6 +348,7 @@ private fun MessageListPagedContent(
     haptics: HapticFeedback,
     onShowStatusDialog: (Message) -> Unit,
     onShowReactions: (List<Reaction>) -> Unit,
+    onInlineImageClick: (Bitmap) -> Unit,
     modifier: Modifier = Modifier,
     quickEmojis: List<String>,
 ) {
@@ -336,7 +418,7 @@ private fun MessageListPagedContent(
                             UnreadMessagesDivider()
                             RenderPagedChatMessageRow(
                                 message = message,
-                                inlineImageBitmap = privateImageRenderState.imageByMessageUuid[message.uuid],
+                                inlineImageData = privateImageRenderState.imageByMessageUuid[message.uuid],
                                 state = state,
                                 nodeMap = nodeMap,
                                 handlers = handlers,
@@ -346,6 +428,7 @@ private fun MessageListPagedContent(
                                 listState = listState,
                                 onShowStatusDialog = onShowStatusDialog,
                                 onShowReactions = onShowReactions,
+                                onInlineImageClick = onInlineImageClick,
                                 showUserName = !hasSamePrev,
                                 hasSamePrev = hasSamePrev,
                                 hasSameNext = hasSameNext,
@@ -355,7 +438,7 @@ private fun MessageListPagedContent(
                     } else {
                         RenderPagedChatMessageRow(
                             message = message,
-                            inlineImageBitmap = privateImageRenderState.imageByMessageUuid[message.uuid],
+                            inlineImageData = privateImageRenderState.imageByMessageUuid[message.uuid],
                             state = state,
                             nodeMap = nodeMap,
                             handlers = handlers,
@@ -365,6 +448,7 @@ private fun MessageListPagedContent(
                             listState = listState,
                             onShowStatusDialog = onShowStatusDialog,
                             onShowReactions = onShowReactions,
+                            onInlineImageClick = onInlineImageClick,
                             modifier = itemModifier,
                             showUserName = !hasSamePrev,
                             hasSamePrev = hasSamePrev,
@@ -398,7 +482,7 @@ private fun MessageListPagedContent(
 @Composable
 private fun RenderPagedChatMessageRow(
     message: Message,
-    inlineImageBitmap: ImageBitmap?,
+    inlineImageData: TimelinePrivateImageMessageData?,
     state: MessageListPagedState,
     nodeMap: Map<Int, Node>,
     handlers: MessageListHandlers,
@@ -408,6 +492,7 @@ private fun RenderPagedChatMessageRow(
     listState: LazyListState,
     onShowStatusDialog: (Message) -> Unit,
     onShowReactions: (List<Reaction>) -> Unit,
+    onInlineImageClick: (Bitmap) -> Unit,
     modifier: Modifier = Modifier,
     showUserName: Boolean,
     hasSamePrev: Boolean,
@@ -420,6 +505,11 @@ private fun RenderPagedChatMessageRow(
             derivedStateOf { state.selectedIds.value.contains(message.uuid) }
         }
     val node = nodeMap[message.node.num] ?: message.node
+    val inlineImageBitmap = inlineImageData?.bitmap?.asImageBitmap()
+    val inlineImageChunkInfoText =
+        inlineImageData?.let {
+            stringResource(Res.string.image_timeline_chunk_progress, it.availableChunks, it.totalChunks)
+        }
 
     MessageItem(
         modifier = modifier,
@@ -427,6 +517,7 @@ private fun RenderPagedChatMessageRow(
         ourNode = ourNode,
         message = message,
         inlineImageBitmap = inlineImageBitmap,
+        inlineImageChunkInfoText = inlineImageChunkInfoText,
         selected = selected,
         inSelectionMode = inSelectionMode,
         onClick = { if (inSelectionMode) state.selectedIds.toggle(message.uuid) },
@@ -469,10 +560,48 @@ private fun RenderPagedChatMessageRow(
             }
         },
         onDecodeImage = { handlers.onDecodeImage(message) },
+        onInlineImageClick = {
+            inlineImageData?.bitmap?.let(onInlineImageClick)
+        },
         hasSamePrev = hasSamePrev,
         hasSameNext = hasSameNext,
         quickEmojis = quickEmojis,
     )
+}
+
+private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap): Boolean {
+    val now = System.currentTimeMillis()
+    val displayName = "meshtastic_$now.jpg"
+    val values =
+        ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Meshtastic")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+
+    val resolver = context.contentResolver
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+    return runCatching {
+        resolver.openOutputStream(uri)?.use { output ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)
+        } ?: false
+    }
+        .getOrElse {
+            resolver.delete(uri, null, null)
+            false
+        }
+        .also { success ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val pendingValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                resolver.update(uri, pendingValues, null, null)
+            }
+            if (!success) {
+                resolver.delete(uri, null, null)
+            }
+        }
 }
 
 @Suppress("CyclomaticComplexMethod")
