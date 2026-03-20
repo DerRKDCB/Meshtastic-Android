@@ -137,16 +137,10 @@ import org.meshtastic.core.resources.attach_file
 import org.meshtastic.core.resources.attach_image
 import org.meshtastic.core.resources.image_adjustment_duty_cycle
 import org.meshtastic.core.resources.image_adjustment_duty_cycle_summary
-import org.meshtastic.core.resources.image_adjustment_duty_cycle_max
-import org.meshtastic.core.resources.image_adjustment_duty_cycle_value
-import org.meshtastic.core.resources.image_adjustment_estimated_transmission_time
-import org.meshtastic.core.resources.image_adjustment_jpeg_quality
-import org.meshtastic.core.resources.image_adjustment_jpeg_quality_value
 import org.meshtastic.core.resources.image_adjustment_result_line_primary
 import org.meshtastic.core.resources.image_adjustment_result_line_secondary
 import org.meshtastic.core.resources.image_adjustment_results
 import org.meshtastic.core.resources.image_adjustment_milliseconds_value
-import org.meshtastic.core.resources.image_adjustment_number_of_chunks
 import org.meshtastic.core.resources.image_adjustment_preview
 import org.meshtastic.core.resources.image_adjustment_select_max_side_length
 import org.meshtastic.core.resources.image_adjustment_max_transmission_time
@@ -166,6 +160,7 @@ import java.nio.charset.StandardCharsets
 import kotlin.math.ceil
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
@@ -316,13 +311,29 @@ private fun formatDutyCyclePercent(value: Float): String {
     }
 }
 
-private fun snapTransmissionTimeSeconds(value: Float, min: Float, max: Float): Float {
+private fun normalizeTransmissionSliderPosition(seconds: Float, min: Float, max: Float): Float {
+    if (max <= min) {
+        return 0f
+    }
+    val normalizedSeconds = ((seconds - min) / (max - min)).coerceIn(0f, 1f)
+    return sqrt(normalizedSeconds)
+}
+
+private fun transmissionSecondsFromSliderPosition(position: Float, min: Float, max: Float): Float {
     if (max <= min) {
         return min
     }
-    val stepSize = (max - min) / (TRANSMISSION_TIME_SLIDER_STEPS - 1)
-    val stepIndex = ((value - min) / stepSize).roundToInt().coerceIn(0, TRANSMISSION_TIME_SLIDER_STEPS - 1)
-    return min + (stepIndex * stepSize)
+    val clampedPosition = position.coerceIn(0f, 1f)
+    return min + (clampedPosition * clampedPosition * (max - min))
+}
+
+private fun snapTransmissionSliderPosition(position: Float): Float {
+    val stepCount = TRANSMISSION_TIME_SLIDER_STEPS - 1
+    if (stepCount <= 0) {
+        return position.coerceIn(0f, 1f)
+    }
+    val snappedStep = (position.coerceIn(0f, 1f) * stepCount).roundToInt().coerceIn(0, stepCount)
+    return snappedStep / stepCount.toFloat()
 }
 
 /**
@@ -1115,16 +1126,24 @@ private fun ImageAdjustmentDialog(
             0f
         }
     val actualDutyPercentText = formatDutyCyclePercent(actualDutyPercent)
-    val boundedSelectedMaxTransmissionTimeSeconds =
+    val selectedTransmissionSliderPosition =
         if (maxTransmissionSeconds > 0f) {
-            snapTransmissionTimeSeconds(
-                selectedMaxTransmissionTimeSeconds.coerceIn(minTransmissionSeconds, maxTransmissionSeconds),
-                minTransmissionSeconds,
-                maxTransmissionSeconds,
+            snapTransmissionSliderPosition(
+                normalizeTransmissionSliderPosition(
+                    selectedMaxTransmissionTimeSeconds.coerceIn(minTransmissionSeconds, maxTransmissionSeconds),
+                    minTransmissionSeconds,
+                    maxTransmissionSeconds,
+                )
             )
         } else {
             0f
         }
+    val boundedSelectedMaxTransmissionTimeSeconds =
+        transmissionSecondsFromSliderPosition(
+            selectedTransmissionSliderPosition,
+            minTransmissionSeconds,
+            maxTransmissionSeconds,
+        )
     val selectedMaxTransmissionTimeText =
         DateUtils.formatElapsedTime(boundedSelectedMaxTransmissionTimeSeconds.roundToInt().toLong())
 
@@ -1175,8 +1194,14 @@ private fun ImageAdjustmentDialog(
                 if (selectedMaxTransmissionTimeSeconds <= 0f) {
                     minSeconds
                 } else {
-                    snapTransmissionTimeSeconds(
-                        selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                    transmissionSecondsFromSliderPosition(
+                        snapTransmissionSliderPosition(
+                            normalizeTransmissionSliderPosition(
+                                selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                                minSeconds,
+                                maxSeconds,
+                            )
+                        ),
                         minSeconds,
                         maxSeconds,
                     )
@@ -1189,8 +1214,14 @@ private fun ImageAdjustmentDialog(
                 if (selectedMaxTransmissionTimeSeconds <= 0f) {
                     minSeconds
                 } else {
-                    snapTransmissionTimeSeconds(
-                        selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                    transmissionSecondsFromSliderPosition(
+                        snapTransmissionSliderPosition(
+                            normalizeTransmissionSliderPosition(
+                                selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                                minSeconds,
+                                maxSeconds,
+                            )
+                        ),
                         minSeconds,
                         maxSeconds,
                     )
@@ -1250,14 +1281,6 @@ private fun ImageAdjustmentDialog(
                     ),
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                Text(
-                    stringResource(Res.string.image_adjustment_duty_cycle_value, formatDutyCyclePercent(boundedDutyCyclePercent)),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    stringResource(Res.string.image_adjustment_duty_cycle_max, formatDutyCyclePercent(regionMaxDutyCyclePercent)),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
                 Slider(
                     value = boundedDutyCyclePercent,
                     onValueChange = { value ->
@@ -1295,14 +1318,18 @@ private fun ImageAdjustmentDialog(
                 )
                 if (maxTransmissionSeconds > 0f) {
                     Slider(
-                        value = boundedSelectedMaxTransmissionTimeSeconds,
+                        value = selectedTransmissionSliderPosition,
                         onValueChange = { value ->
                             onMaxTransmissionTimeChange(
-                                snapTransmissionTimeSeconds(value, minTransmissionSeconds, maxTransmissionSeconds)
+                                transmissionSecondsFromSliderPosition(
+                                    snapTransmissionSliderPosition(value),
+                                    minTransmissionSeconds,
+                                    maxTransmissionSeconds,
+                                )
                             )
                         },
                         steps = TRANSMISSION_TIME_SLIDER_STEPS - 2,
-                        valueRange = minTransmissionSeconds..maxTransmissionSeconds,
+                        valueRange = 0f..1f,
                     )
                 }
 
@@ -1313,7 +1340,7 @@ private fun ImageAdjustmentDialog(
                     stringResource(
                         Res.string.image_adjustment_result_line_primary,
                         chunks.size,
-                        selectedJpegQuality,
+                        "$selectedJpegQuality%",
                         estimatedTransmissionTimeText,
                     ),
                     style = MaterialTheme.typography.bodyMedium,

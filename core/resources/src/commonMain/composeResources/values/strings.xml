@@ -196,9 +196,9 @@
     <string name="attach_image">Image</string>
     <string name="attach_file">File</string>
     <string name="image_adjustment_preview">Image preview</string>
-    <string name="image_adjustment_select_max_side_length">Select maximum side length:</string>
+    <string name="image_adjustment_select_max_side_length">Select maximum resolution:</string>
     <string name="image_adjustment_jpeg_quality">JPEG quality</string>
-    <string name="image_adjustment_jpeg_quality_value">JPEG quality: %1$d%%</string>
+    <string name="image_adjustment_jpeg_quality_value">JPEG quality: %1$s</string>
     <string name="image_adjustment_max_transmission_time">Max transmission time</string>
     <string name="image_adjustment_max_transmission_time_value">Max transmission time: %1$s</string>
     <string name="percentage_value">%1$d%%</string>
@@ -209,7 +209,7 @@
     <string name="image_adjustment_duty_cycle_max">Region max: %1$s</string>
     <string name="image_adjustment_duty_cycle_summary">Selected: %1$s • Region max: %2$s</string>
     <string name="image_adjustment_results">Results</string>
-    <string name="image_adjustment_result_line_primary">Chunks %1$d • JPEG %2$d%% • TX %3$s</string>
+    <string name="image_adjustment_result_line_primary">Chunks %1$d • JPEG %2$s • TX %3$s</string>
     <string name="image_adjustment_result_line_secondary">Int %1$s • Pkt TOA %2$s • TOA %3$s • Duty %4$s</string>
     <string name="image_adjustment_milliseconds_value">%1$d ms</string>
     <string name="image_adjustment_number_of_chunks">Number of chunks: %1$d</string>
