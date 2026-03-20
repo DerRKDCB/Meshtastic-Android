@@ -61,8 +61,11 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.util.Base64
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.UUID
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
@@ -656,8 +659,33 @@ private fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: I
             .joinToString(separator = "")
             .replace(Regex("\\s+"), "")
     if (payload.isEmpty()) return null
-    val imageBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
+    val payloadBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
+    val imageBytes = maybeGunzip(payloadBytes)
     return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+}
+
+private fun maybeGzip(inputBytes: ByteArray, isEnabled: Boolean): ByteArray {
+    if (!isEnabled) return inputBytes
+    return runCatching {
+        val outputStream = ByteArrayOutputStream()
+        GZIPOutputStream(outputStream).use { gzip ->
+            gzip.write(inputBytes)
+        }
+        outputStream.toByteArray()
+    }.getOrDefault(inputBytes)
+}
+
+private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
+    if (inputBytes.size < 2) return inputBytes
+    val isGzip = inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
+    if (!isGzip) return inputBytes
+    return runCatching {
+        ByteArrayInputStream(inputBytes).use { byteInput ->
+            GZIPInputStream(byteInput).use { gzipInput ->
+                gzipInput.readBytes()
+            }
+        }
+    }.getOrDefault(inputBytes)
 }
 
 private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap, imageId: String?): Boolean {
@@ -700,8 +728,14 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
         }
 }
 
-private fun buildImageChunks(imageId: String, jpegBytes: ByteArray, maxChunkLength: Int = IMAGE_CHUNK_MAX_LENGTH): List<String> {
-    val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+private fun buildImageChunks(
+    imageId: String,
+    jpegBytes: ByteArray,
+    zipCompressionEnabled: Boolean = true,
+    maxChunkLength: Int = IMAGE_CHUNK_MAX_LENGTH,
+): List<String> {
+    val payloadBytes = maybeGzip(jpegBytes, zipCompressionEnabled)
+    val base64 = Base64.encodeToString(payloadBytes, Base64.NO_WRAP)
     if (base64.isEmpty()) return emptyList()
 
     var totalPartsGuess = 1
@@ -924,7 +958,12 @@ private fun ImageAdjustmentDialog(
                     val imageId = UUID.randomUUID().toString().take(8)
                     val baos = ByteArrayOutputStream()
                     scaledBitmap.compress(Bitmap.CompressFormat.JPEG, selectedJpegQuality.coerceIn(1, 100), baos)
-                    val generatedChunks = buildImageChunks(imageId = imageId, jpegBytes = baos.toByteArray())
+                    val generatedChunks =
+                        buildImageChunks(
+                            imageId = imageId,
+                            jpegBytes = baos.toByteArray(),
+                            zipCompressionEnabled = true,
+                        )
                     chunks = generatedChunks
                     previewBitmap = decodeBitmapFromOutgoingChunks(generatedChunks)
                 }
