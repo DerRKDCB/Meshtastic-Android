@@ -36,7 +36,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -82,6 +81,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
@@ -1251,12 +1251,14 @@ private fun ImageAdjustmentDialog(
         }
     }
 
-    Dialog(onDismissRequest = onCancel) {
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
         Surface(
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f).padding(16.dp)
         ) {
-            val sizeOptionsScrollState = rememberScrollState()
             Column(
                 modifier = Modifier.padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1292,17 +1294,23 @@ private fun ImageAdjustmentDialog(
                 Text(stringResource(Res.string.image_adjustment_select_max_side_length))
 
                 Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(sizeOptionsScrollState),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     sizes.forEach { size ->
                         if (selectedSize == size) {
-                            Button(onClick = { onSizeChange(size) }) {
-                                Text("$size px")
+                            Button(
+                                onClick = { onSizeChange(size) },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("$size px", textAlign = TextAlign.Center)
                             }
                         } else {
-                            OutlinedButton(onClick = { onSizeChange(size) }) {
-                                Text("$size px")
+                            OutlinedButton(
+                                onClick = { onSizeChange(size) },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("$size px", textAlign = TextAlign.Center)
                             }
                         }
                     }
