@@ -34,6 +34,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -66,10 +68,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.ui.window.Dialog
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.asImageBitmap
@@ -126,6 +129,8 @@ import org.meshtastic.core.resources.attach_file
 import org.meshtastic.core.resources.attach_image
 import org.meshtastic.core.resources.image_adjustment_chunk_delay
 import org.meshtastic.core.resources.image_adjustment_chunk_delay_value
+import org.meshtastic.core.resources.image_adjustment_jpeg_quality
+import org.meshtastic.core.resources.image_adjustment_jpeg_quality_value
 import org.meshtastic.core.resources.image_adjustment_number_of_chunks
 import org.meshtastic.core.resources.image_adjustment_preview
 import org.meshtastic.core.resources.image_adjustment_select_max_side_length
@@ -149,6 +154,7 @@ private const val IMAGE_CHUNK_MAX_LENGTH = 175
 private const val MIN_IMAGE_CHUNK_DELAY_MILLIS = 3_000
 private const val MAX_IMAGE_CHUNK_DELAY_MILLIS = 5 * 60 * 1_000
 private const val DEFAULT_IMAGE_CHUNK_DELAY_MILLIS = 15_000
+private const val DEFAULT_IMAGE_JPEG_QUALITY = 90
 
 private data class DecodeImageUiState(
     val visible: Boolean = false,
@@ -725,6 +731,26 @@ private fun buildImageChunks(imageId: String, jpegBytes: ByteArray, maxChunkLeng
     return emptyList()
 }
 
+private fun decodeBitmapFromOutgoingChunks(chunks: List<String>): Bitmap? {
+    if (chunks.isEmpty()) return null
+    val parsedChunks = chunks.mapNotNull(::parseImageChunk)
+    if (parsedChunks.size != chunks.size) return null
+
+    val firstChunk = parsedChunks.firstOrNull() ?: return null
+    val imageId = firstChunk.imageId
+    val totalParts = firstChunk.totalParts
+    val partsByIndex = mutableMapOf<Int, String>()
+
+    parsedChunks.forEach { chunk ->
+        if (chunk.imageId != imageId || chunk.totalParts != totalParts) {
+            return null
+        }
+        partsByIndex[chunk.partIndex] = chunk.payload
+    }
+
+    return decodeBitmapFromChunks(partsByIndex = partsByIndex, totalParts = totalParts)
+}
+
 @Composable
 private fun DecodeImageDialog(state: DecodeImageUiState, onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -870,18 +896,21 @@ private fun handleQuickChatAction(
 private fun ImageAdjustmentDialog(
     imageUri: Uri,
     selectedSize: Int,
+    selectedJpegQuality: Int,
     selectedChunkDelayMillis: Int,
     onSizeChange: (Int) -> Unit,
+    onJpegQualityChange: (Int) -> Unit,
     onChunkDelayChange: (Int) -> Unit,
     onSend: (List<String>, Int) -> Unit,
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
     val sizes = listOf(32, 64, 128, 256, 512)
-    var scaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    val qualityOptions = listOf(50, 60, 70, 80, 90)
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chunks by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    LaunchedEffect(imageUri, selectedSize) {
+    LaunchedEffect(imageUri, selectedSize, selectedJpegQuality) {
         withContext(Dispatchers.IO) {
             context.contentResolver.openInputStream(imageUri)?.use { input ->
                 val original: Bitmap? = BitmapFactory.decodeStream(input)
@@ -889,15 +918,15 @@ private fun ImageAdjustmentDialog(
                     val ratio = minOf(selectedSize.toFloat() / it.width, selectedSize.toFloat() / it.height)
                     val newWidth = (it.width * ratio).toInt()
                     val newHeight = (it.height * ratio).toInt()
-                    scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
+                    val scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
 
                     // Encode to Base64 and create chunks
-                    scaledBitmap?.let { bmp ->
-                        val imageId = UUID.randomUUID().toString().take(8)
-                        val baos = ByteArrayOutputStream()
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 90, baos)
-                        chunks = buildImageChunks(imageId = imageId, jpegBytes = baos.toByteArray())
-                    }
+                    val imageId = UUID.randomUUID().toString().take(8)
+                    val baos = ByteArrayOutputStream()
+                    scaledBitmap.compress(Bitmap.CompressFormat.JPEG, selectedJpegQuality.coerceIn(1, 100), baos)
+                    val generatedChunks = buildImageChunks(imageId = imageId, jpegBytes = baos.toByteArray())
+                    chunks = generatedChunks
+                    previewBitmap = decodeBitmapFromOutgoingChunks(generatedChunks)
                 }
             }
         }
@@ -908,12 +937,14 @@ private fun ImageAdjustmentDialog(
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f).padding(16.dp)
         ) {
+            val sizeOptionsScrollState = rememberScrollState()
+            val qualityOptionsScrollState = rememberScrollState()
             Column(
-                modifier = Modifier.padding(16.dp).fillMaxSize(),
+                modifier = Modifier.padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                scaledBitmap?.let {
+                previewBitmap?.let {
                     Image(
                         bitmap = it.asImageBitmap(),
                         contentDescription = stringResource(Res.string.image_adjustment_preview),
@@ -925,20 +956,44 @@ private fun ImageAdjustmentDialog(
 
                 Text(stringResource(Res.string.image_adjustment_select_max_side_length))
 
-                sizes.forEach { size ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        RadioButton(
-                            selected = selectedSize == size,
-                            onClick = { onSizeChange(size) }
-                        )
-                        Text("$size px")
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(sizeOptionsScrollState),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    sizes.forEach { size ->
+                        if (selectedSize == size) {
+                            Button(onClick = { onSizeChange(size) }) {
+                                Text("$size px")
+                            }
+                        } else {
+                            OutlinedButton(onClick = { onSizeChange(size) }) {
+                                Text("$size px")
+                            }
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.size(16.dp))
+                Text(stringResource(Res.string.image_adjustment_jpeg_quality))
+                Text(
+                    stringResource(Res.string.image_adjustment_jpeg_quality_value, selectedJpegQuality),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(qualityOptionsScrollState),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    qualityOptions.forEach { quality ->
+                        if (selectedJpegQuality == quality) {
+                            Button(onClick = { onJpegQualityChange(quality) }) {
+                                Text("$quality%")
+                            }
+                        } else {
+                            OutlinedButton(onClick = { onJpegQualityChange(quality) }) {
+                                Text("$quality%")
+                            }
+                        }
+                    }
+                }
 
                 Text(stringResource(Res.string.image_adjustment_chunk_delay))
                 Text(
@@ -956,8 +1011,6 @@ private fun ImageAdjustmentDialog(
                 Spacer(modifier = Modifier.size(8.dp))
 
                 Text(stringResource(Res.string.image_adjustment_number_of_chunks, chunks.size))
-
-                Spacer(modifier = Modifier.size(16.dp))
 
                 Row {
                     Button(onClick = onCancel) {
@@ -1026,6 +1079,7 @@ private fun MessageInput(
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
 
     var selectedSize by remember { mutableStateOf(128) }
+    var selectedJpegQuality by remember { mutableStateOf(DEFAULT_IMAGE_JPEG_QUALITY) }
     var selectedChunkDelayMillis by remember { mutableStateOf(DEFAULT_IMAGE_CHUNK_DELAY_MILLIS) }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -1126,8 +1180,10 @@ private fun MessageInput(
         ImageAdjustmentDialog(
             imageUri = uri,
             selectedSize = selectedSize,
+            selectedJpegQuality = selectedJpegQuality,
             selectedChunkDelayMillis = selectedChunkDelayMillis,
             onSizeChange = { selectedSize = it },
+            onJpegQualityChange = { selectedJpegQuality = it.coerceIn(1, 100) },
             onChunkDelayChange = {
                 selectedChunkDelayMillis =
                     it.coerceIn(MIN_IMAGE_CHUNK_DELAY_MILLIS, MAX_IMAGE_CHUNK_DELAY_MILLIS)

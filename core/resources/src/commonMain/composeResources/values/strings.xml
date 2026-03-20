@@ -197,6 +197,9 @@
     <string name="attach_file">File</string>
     <string name="image_adjustment_preview">Image preview</string>
     <string name="image_adjustment_select_max_side_length">Select maximum side length:</string>
+    <string name="image_adjustment_jpeg_quality">JPEG quality</string>
+    <string name="image_adjustment_jpeg_quality_value">JPEG quality: %1$d%%</string>
+    <string name="percentage_value">%1$d%%</string>
     <string name="image_adjustment_chunk_delay">Chunk delay</string>
     <string name="image_adjustment_chunk_delay_value">Chunk delay: %1$d s</string>
     <string name="image_adjustment_number_of_chunks">Number of chunks: %1$d</string>
