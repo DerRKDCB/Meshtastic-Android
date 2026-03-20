@@ -25,6 +25,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.text.format.DateUtils
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
@@ -132,6 +133,7 @@ import org.meshtastic.core.resources.attach_file
 import org.meshtastic.core.resources.attach_image
 import org.meshtastic.core.resources.image_adjustment_chunk_delay
 import org.meshtastic.core.resources.image_adjustment_chunk_delay_value
+import org.meshtastic.core.resources.image_adjustment_estimated_transmission_time
 import org.meshtastic.core.resources.image_adjustment_jpeg_quality
 import org.meshtastic.core.resources.image_adjustment_jpeg_quality_value
 import org.meshtastic.core.resources.image_adjustment_number_of_chunks
@@ -157,7 +159,7 @@ private const val IMAGE_CHUNK_MAX_LENGTH = 175
 private const val MIN_IMAGE_CHUNK_DELAY_MILLIS = 3_000
 private const val MAX_IMAGE_CHUNK_DELAY_MILLIS = 5 * 60 * 1_000
 private const val DEFAULT_IMAGE_CHUNK_DELAY_MILLIS = 15_000
-private const val DEFAULT_IMAGE_JPEG_QUALITY = 90
+private const val DEFAULT_IMAGE_JPEG_QUALITY = 10
 
 private data class DecodeImageUiState(
     val visible: Boolean = false,
@@ -943,6 +945,9 @@ private fun ImageAdjustmentDialog(
     val qualityOptions = listOf(10, 30, 60, 80, 90)
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chunks by remember { mutableStateOf<List<String>>(emptyList()) }
+    val estimatedTransmissionSeconds =
+        ((chunks.size - 1).coerceAtLeast(0) * selectedChunkDelayMillis) / 1000
+    val estimatedTransmissionTimeText = DateUtils.formatElapsedTime(estimatedTransmissionSeconds.toLong())
 
     LaunchedEffect(imageUri, selectedSize, selectedJpegQuality) {
         withContext(Dispatchers.IO) {
@@ -1050,6 +1055,13 @@ private fun ImageAdjustmentDialog(
                 Spacer(modifier = Modifier.size(8.dp))
 
                 Text(stringResource(Res.string.image_adjustment_number_of_chunks, chunks.size))
+                Text(
+                    stringResource(
+                        Res.string.image_adjustment_estimated_transmission_time,
+                        estimatedTransmissionTimeText,
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
 
                 Row {
                     Button(onClick = onCancel) {
@@ -1117,7 +1129,7 @@ private fun MessageInput(
 
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
 
-    var selectedSize by remember { mutableStateOf(128) }
+    var selectedSize by remember { mutableStateOf(32) }
     var selectedJpegQuality by remember { mutableStateOf(DEFAULT_IMAGE_JPEG_QUALITY) }
     var selectedChunkDelayMillis by remember { mutableStateOf(DEFAULT_IMAGE_CHUNK_DELAY_MILLIS) }
 

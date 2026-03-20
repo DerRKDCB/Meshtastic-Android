@@ -203,6 +203,7 @@
     <string name="image_adjustment_chunk_delay">Chunk delay</string>
     <string name="image_adjustment_chunk_delay_value">Chunk delay: %1$d s</string>
     <string name="image_adjustment_number_of_chunks">Number of chunks: %1$d</string>
+    <string name="image_adjustment_estimated_transmission_time">Estimated transmission time: %1$s</string>
     <string name="warning_not_paired">You haven't yet paired a Meshtastic compatible radio with this phone. Please pair a device and set your username.\n\nThis open-source application is in development, if you find problems please post on our forum: https://github.com/orgs/meshtastic/discussions.\n\nFor more information see our web page - www.meshtastic.org.</string>
     <string name="you">You</string>
     <string name="analytics_okay">Allow analytics and crash reporting.</string>
