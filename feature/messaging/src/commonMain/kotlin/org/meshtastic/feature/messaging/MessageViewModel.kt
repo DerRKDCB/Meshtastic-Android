@@ -23,6 +23,7 @@ import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -84,6 +85,11 @@ class MessageViewModel(
 
     private val _showFiltered = MutableStateFlow(false)
     val showFiltered: StateFlow<Boolean> = _showFiltered.asStateFlow()
+
+    private var sendChunksJob: Job? = null
+
+    private val _isSendingChunks = MutableStateFlow(false)
+    val isSendingChunks: StateFlow<Boolean> = _isSendingChunks.asStateFlow()
 
     val quickChatActions = quickChatActionRepository.getAllActions().stateInWhileSubscribed(initialValue = emptyList())
 
@@ -229,14 +235,28 @@ class MessageViewModel(
         if (chunks.isEmpty()) {
             return
         }
-        viewModelScope.launch {
-            chunks.forEachIndexed { index, chunk ->
-                sendMessageUseCase.invoke(chunk, contactKey, null)
-                if (index < chunks.lastIndex) {
-                    delay(delayMillis.toLong())
+        sendChunksJob?.cancel()
+        sendChunksJob =
+            viewModelScope.launch {
+                _isSendingChunks.value = true
+                try {
+                    chunks.forEachIndexed { index, chunk ->
+                        sendMessageUseCase.invoke(chunk, contactKey, null)
+                        if (index < chunks.lastIndex) {
+                            delay(delayMillis.toLong())
+                        }
+                    }
+                } finally {
+                    _isSendingChunks.value = false
+                    sendChunksJob = null
                 }
             }
-        }
+    }
+
+    fun stopSendingChunks() {
+        sendChunksJob?.cancel()
+        sendChunksJob = null
+        _isSendingChunks.value = false
     }
 
     fun sendReaction(emoji: String, replyId: Int, contactKey: String) =
