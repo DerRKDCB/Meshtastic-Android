@@ -106,11 +106,15 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.common.util.HomoglyphCharacterStringTransformer
+import org.meshtastic.core.model.Channel
+import org.meshtastic.core.model.ChannelOption
 import org.meshtastic.core.database.entity.QuickChatAction
 import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.Node
+import org.meshtastic.core.model.RegionInfo
 import org.meshtastic.core.model.util.getChannel
+import org.meshtastic.proto.Config
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.close
 import org.meshtastic.core.resources.decode_image
@@ -131,8 +135,9 @@ import org.meshtastic.core.resources.unknown_channel
 import org.meshtastic.core.resources.attachment
 import org.meshtastic.core.resources.attach_file
 import org.meshtastic.core.resources.attach_image
-import org.meshtastic.core.resources.image_adjustment_chunk_delay
-import org.meshtastic.core.resources.image_adjustment_chunk_delay_value
+import org.meshtastic.core.resources.image_adjustment_duty_cycle
+import org.meshtastic.core.resources.image_adjustment_duty_cycle_max
+import org.meshtastic.core.resources.image_adjustment_duty_cycle_value
 import org.meshtastic.core.resources.image_adjustment_estimated_transmission_time
 import org.meshtastic.core.resources.image_adjustment_jpeg_quality
 import org.meshtastic.core.resources.image_adjustment_jpeg_quality_value
@@ -151,15 +156,22 @@ import org.meshtastic.feature.messaging.component.QuickChatRow
 import org.meshtastic.feature.messaging.component.ReplySnippet
 import org.meshtastic.feature.messaging.component.ScrollToBottomFab
 import java.nio.charset.StandardCharsets
+import kotlin.math.ceil
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
 private const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
 private const val IMAGE_CHUNK_MAX_LENGTH = 175
-private const val MIN_IMAGE_CHUNK_DELAY_MILLIS = 3_000
-private const val MAX_IMAGE_CHUNK_DELAY_MILLIS = 5 * 60 * 1_000
-private const val DEFAULT_IMAGE_CHUNK_DELAY_MILLIS = 15_000
+private const val MIN_IMAGE_DUTY_CYCLE_PERCENT = 0.1f
+private const val DEFAULT_IMAGE_DUTY_CYCLE_PERCENT = 1.0f
 private const val DEFAULT_IMAGE_JPEG_QUALITY = 10
+
+private data class ModemAirtimeParams(
+    val spreadFactor: Int,
+    val codingRateDenominator: Int,
+)
 
 private data class DecodeImageUiState(
     val visible: Boolean = false,
@@ -183,6 +195,104 @@ private data class ImageChunkScanResult(
     val partsByIndex: Map<Int, String>,
     val totalParts: Int,
 )
+
+private fun maxDutyCyclePercentForRegion(regionCode: Config.LoRaConfig.RegionCode): Float =
+    when (regionCode) {
+        Config.LoRaConfig.RegionCode.EU_433,
+        Config.LoRaConfig.RegionCode.EU_868,
+        Config.LoRaConfig.RegionCode.UA_433,
+        -> 10.0f
+        Config.LoRaConfig.RegionCode.UA_868 -> 1.0f
+        else -> 100.0f
+    }
+
+private fun modemParamsForPreset(modemPreset: Config.LoRaConfig.ModemPreset): ModemAirtimeParams =
+    when (modemPreset) {
+        Config.LoRaConfig.ModemPreset.VERY_LONG_SLOW -> ModemAirtimeParams(spreadFactor = 12, codingRateDenominator = 8)
+        Config.LoRaConfig.ModemPreset.LONG_SLOW -> ModemAirtimeParams(spreadFactor = 12, codingRateDenominator = 8)
+        Config.LoRaConfig.ModemPreset.LONG_FAST -> ModemAirtimeParams(spreadFactor = 11, codingRateDenominator = 5)
+        Config.LoRaConfig.ModemPreset.LONG_MODERATE -> ModemAirtimeParams(spreadFactor = 10, codingRateDenominator = 5)
+        Config.LoRaConfig.ModemPreset.LONG_TURBO -> ModemAirtimeParams(spreadFactor = 11, codingRateDenominator = 5)
+        Config.LoRaConfig.ModemPreset.MEDIUM_SLOW -> ModemAirtimeParams(spreadFactor = 10, codingRateDenominator = 7)
+        Config.LoRaConfig.ModemPreset.MEDIUM_FAST -> ModemAirtimeParams(spreadFactor = 9, codingRateDenominator = 5)
+        Config.LoRaConfig.ModemPreset.SHORT_SLOW -> ModemAirtimeParams(spreadFactor = 8, codingRateDenominator = 5)
+        Config.LoRaConfig.ModemPreset.SHORT_FAST -> ModemAirtimeParams(spreadFactor = 7, codingRateDenominator = 5)
+        Config.LoRaConfig.ModemPreset.SHORT_TURBO -> ModemAirtimeParams(spreadFactor = 7, codingRateDenominator = 5)
+    }
+
+private fun bandwidthKhz(loraConfig: Config.LoRaConfig): Double {
+    if (!loraConfig.use_preset) {
+        return when (loraConfig.bandwidth) {
+            31 -> 31.25
+            62 -> 62.5
+            200 -> 203.125
+            400 -> 406.25
+            800 -> 812.5
+            1600 -> 1625.0
+            else -> loraConfig.bandwidth.toDouble()
+        }
+    }
+
+    val baseBandwidthMHz = ChannelOption.from(loraConfig.modem_preset)?.bandwidth ?: ChannelOption.DEFAULT.bandwidth
+    val regionScale = if (RegionInfo.fromRegionCode(loraConfig.region)?.wideLora == true) 3.25 else 1.0
+    return baseBandwidthMHz.toDouble() * regionScale * 1000.0
+}
+
+private fun estimatePacketAirtimeMillis(payloadBytes: Int, loraConfig: Config.LoRaConfig): Int {
+    if (payloadBytes <= 0) {
+        return 0
+    }
+
+    val modemParams =
+        if (loraConfig.use_preset) {
+            modemParamsForPreset(loraConfig.modem_preset)
+        } else {
+            ModemAirtimeParams(
+                spreadFactor = loraConfig.spread_factor.coerceIn(7, 12),
+                codingRateDenominator = loraConfig.coding_rate.coerceIn(5, 8),
+            )
+        }
+
+    val sf = modemParams.spreadFactor
+    val codingRateTerm = (modemParams.codingRateDenominator - 4).coerceIn(1, 4)
+    val bwKhz = bandwidthKhz(loraConfig)
+    if (bwKhz <= 0.0) {
+        return 0
+    }
+
+    val lowDataRateOptimization = if (sf >= 11 && bwKhz <= 125.0) 1 else 0
+    val symbolDurationSeconds = (2.0.pow(sf.toDouble())) / (bwKhz * 1000.0)
+    val preambleSymbols = 8.0 + 4.25
+
+    val numerator = (8.0 * payloadBytes) - (4.0 * sf) + 28.0 + 16.0
+    val denominator = 4.0 * (sf - (2 * lowDataRateOptimization))
+    val payloadSymbolSteps = ceil((numerator / denominator).coerceAtLeast(0.0))
+    val payloadSymbols = 8.0 + (payloadSymbolSteps * (codingRateTerm + 4))
+
+    val airtimeSeconds = (preambleSymbols + payloadSymbols) * symbolDurationSeconds
+    return (airtimeSeconds * 1000.0).roundToInt().coerceAtLeast(1)
+}
+
+private fun interChunkDelayMillisForDutyCycle(
+    dutyCyclePercent: Float,
+    packetAirtimeMillis: Int,
+): Int {
+    if (packetAirtimeMillis <= 0) {
+        return 0
+    }
+    val dutyFraction = (dutyCyclePercent / 100f).coerceIn(0.001f, 1f)
+    val cycleMillis = packetAirtimeMillis / dutyFraction
+    return (cycleMillis - packetAirtimeMillis).roundToInt().coerceAtLeast(0)
+}
+
+private fun formatDutyCyclePercent(value: Float): String {
+    val roundedTenths = (value * 10f).roundToInt() / 10f
+    return if (roundedTenths % 1f == 0f) {
+        "${roundedTenths.toInt()}%"
+    } else {
+        "$roundedTenths%"
+    }
+}
 
 /**
  * The main screen for displaying and sending messages to a contact or channel.
@@ -556,6 +666,7 @@ fun MessageScreen(
                     isEnabled = connectionState.isConnected(),
                     isSendingChunks = isSendingChunks,
                     isHomoglyphEncodingEnabled = homoglyphEncodingEnabled,
+                    loraConfig = channels.lora_config ?: Channel.default.loraConfig,
                     textFieldState = messageInputState,
                     onSendMessage = {
                         val messageText = messageInputState.text.toString().trim { it.isWhitespace() }
@@ -931,12 +1042,13 @@ private fun handleQuickChatAction(
 @Composable
 private fun ImageAdjustmentDialog(
     imageUri: Uri,
+    loraConfig: Config.LoRaConfig,
     selectedSize: Int,
     selectedJpegQuality: Int,
-    selectedChunkDelayMillis: Int,
+    selectedDutyCyclePercent: Float,
     onSizeChange: (Int) -> Unit,
     onJpegQualityChange: (Int) -> Unit,
-    onChunkDelayChange: (Int) -> Unit,
+    onDutyCycleChange: (Float) -> Unit,
     onSend: (List<String>, Int) -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -945,8 +1057,14 @@ private fun ImageAdjustmentDialog(
     val qualityOptions = listOf(10, 30, 60, 80, 90)
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chunks by remember { mutableStateOf<List<String>>(emptyList()) }
-    val estimatedTransmissionSeconds =
-        ((chunks.size - 1).coerceAtLeast(0) * selectedChunkDelayMillis) / 1000
+    val regionMaxDutyCyclePercent = maxDutyCyclePercentForRegion(loraConfig.region)
+    val boundedDutyCyclePercent = selectedDutyCyclePercent.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, regionMaxDutyCyclePercent)
+    val packetPayloadBytes = chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0
+    val packetAirtimeMillis = estimatePacketAirtimeMillis(packetPayloadBytes, loraConfig)
+    val selectedChunkDelayMillis = interChunkDelayMillisForDutyCycle(boundedDutyCyclePercent, packetAirtimeMillis)
+    val estimatedTransmissionMillis =
+        (chunks.size * packetAirtimeMillis) + ((chunks.size - 1).coerceAtLeast(0) * selectedChunkDelayMillis)
+    val estimatedTransmissionSeconds = estimatedTransmissionMillis / 1000
     val estimatedTransmissionTimeText = DateUtils.formatElapsedTime(estimatedTransmissionSeconds.toLong())
 
     LaunchedEffect(imageUri, selectedSize, selectedJpegQuality) {
@@ -959,7 +1077,7 @@ private fun ImageAdjustmentDialog(
                     val newHeight = (it.height * ratio).toInt()
                     val scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
 
-                    // Encode to Base64 and create chunks
+                    // Encode to text payload and create chunks
                     val imageId = UUID.randomUUID().toString().take(8)
                     val baos = ByteArrayOutputStream()
                     scaledBitmap.compress(Bitmap.CompressFormat.JPEG, selectedJpegQuality.coerceIn(1, 100), baos)
@@ -1039,17 +1157,21 @@ private fun ImageAdjustmentDialog(
                     }
                 }
 
-                Text(stringResource(Res.string.image_adjustment_chunk_delay))
+                Text(stringResource(Res.string.image_adjustment_duty_cycle))
                 Text(
-                    stringResource(Res.string.image_adjustment_chunk_delay_value, selectedChunkDelayMillis / 1000),
+                    stringResource(Res.string.image_adjustment_duty_cycle_value, formatDutyCyclePercent(boundedDutyCyclePercent)),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    stringResource(Res.string.image_adjustment_duty_cycle_max, formatDutyCyclePercent(regionMaxDutyCyclePercent)),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Slider(
-                    value = selectedChunkDelayMillis.toFloat(),
+                    value = boundedDutyCyclePercent,
                     onValueChange = { value ->
-                        onChunkDelayChange(value.toInt())
+                        onDutyCycleChange(value)
                     },
-                    valueRange = MIN_IMAGE_CHUNK_DELAY_MILLIS.toFloat()..MAX_IMAGE_CHUNK_DELAY_MILLIS.toFloat(),
+                    valueRange = MIN_IMAGE_DUTY_CYCLE_PERCENT..regionMaxDutyCyclePercent,
                 )
 
                 Spacer(modifier = Modifier.size(8.dp))
@@ -1092,6 +1214,7 @@ private fun MessageInput(
     isEnabled: Boolean,
     isSendingChunks: Boolean = false,
     isHomoglyphEncodingEnabled: Boolean,
+    loraConfig: Config.LoRaConfig,
     textFieldState: TextFieldState,
     modifier: Modifier = Modifier,
     maxByteSize: Int = MESSAGE_CHARACTER_LIMIT_BYTES,
@@ -1131,7 +1254,11 @@ private fun MessageInput(
 
     var selectedSize by remember { mutableStateOf(32) }
     var selectedJpegQuality by remember { mutableStateOf(DEFAULT_IMAGE_JPEG_QUALITY) }
-    var selectedChunkDelayMillis by remember { mutableStateOf(DEFAULT_IMAGE_CHUNK_DELAY_MILLIS) }
+    var selectedDutyCyclePercent by remember {
+        mutableStateOf(
+            DEFAULT_IMAGE_DUTY_CYCLE_PERCENT.coerceAtMost(maxDutyCyclePercentForRegion(loraConfig.region))
+        )
+    }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         selectedImageUri = uri
@@ -1230,24 +1357,23 @@ private fun MessageInput(
     selectedImageUri?.let { uri ->
         ImageAdjustmentDialog(
             imageUri = uri,
+            loraConfig = loraConfig,
             selectedSize = selectedSize,
             selectedJpegQuality = selectedJpegQuality,
-            selectedChunkDelayMillis = selectedChunkDelayMillis,
+            selectedDutyCyclePercent = selectedDutyCyclePercent,
             onSizeChange = { selectedSize = it },
             onJpegQualityChange = { selectedJpegQuality = it.coerceIn(1, 100) },
-            onChunkDelayChange = {
-                selectedChunkDelayMillis =
-                    it.coerceIn(MIN_IMAGE_CHUNK_DELAY_MILLIS, MAX_IMAGE_CHUNK_DELAY_MILLIS)
+            onDutyCycleChange = {
+                selectedDutyCyclePercent =
+                    it.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, maxDutyCyclePercentForRegion(loraConfig.region))
             },
             onSend = { chunks, delayMillis ->
                 selectedImageUri = null
-                val boundedDelayMillis =
-                    delayMillis.coerceIn(MIN_IMAGE_CHUNK_DELAY_MILLIS, MAX_IMAGE_CHUNK_DELAY_MILLIS)
                 if (viewModel != null) {
                     viewModel.sendMessageChunks(
                         chunks = chunks,
                         contactKey = contactKey,
-                        delayMillis = boundedDelayMillis,
+                        delayMillis = delayMillis,
                     )
                 } else {
                     coroutineScope.launch {
@@ -1255,7 +1381,7 @@ private fun MessageInput(
                             chunks.forEachIndexed { index, chunk ->
                                 onSendChunk(chunk)
                                 if (index < chunks.lastIndex) {
-                                    kotlinx.coroutines.delay(boundedDelayMillis.toLong())
+                                    kotlinx.coroutines.delay(delayMillis.toLong())
                                 }
                             }
                         }
@@ -1277,6 +1403,7 @@ private fun MessageInputPreview() {
                 MessageInput(
                     isEnabled = true,
                     isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
                     textFieldState = rememberTextFieldState("Hello"),
                     onSendMessage = {},
                     viewModel = null,
@@ -1286,6 +1413,7 @@ private fun MessageInputPreview() {
                 MessageInput(
                     isEnabled = false,
                     isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
                     textFieldState = rememberTextFieldState("Disabled"),
                     onSendMessage = {},
                     viewModel = null,
@@ -1295,6 +1423,7 @@ private fun MessageInputPreview() {
                 MessageInput(
                     isEnabled = true,
                     isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
                     textFieldState =
                     rememberTextFieldState(
                         "A very long message that might exceed the byte limit " +
@@ -1310,6 +1439,7 @@ private fun MessageInputPreview() {
                 MessageInput(
                     isEnabled = true,
                     isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
                     textFieldState = rememberTextFieldState("こんにちは世界"), // Hello World in Japanese
                     onSendMessage = {},
                     maxByteSize = 10,
