@@ -136,14 +136,21 @@ import org.meshtastic.core.resources.attachment
 import org.meshtastic.core.resources.attach_file
 import org.meshtastic.core.resources.attach_image
 import org.meshtastic.core.resources.image_adjustment_duty_cycle
+import org.meshtastic.core.resources.image_adjustment_duty_cycle_summary
 import org.meshtastic.core.resources.image_adjustment_duty_cycle_max
 import org.meshtastic.core.resources.image_adjustment_duty_cycle_value
 import org.meshtastic.core.resources.image_adjustment_estimated_transmission_time
 import org.meshtastic.core.resources.image_adjustment_jpeg_quality
 import org.meshtastic.core.resources.image_adjustment_jpeg_quality_value
+import org.meshtastic.core.resources.image_adjustment_result_line_primary
+import org.meshtastic.core.resources.image_adjustment_result_line_secondary
+import org.meshtastic.core.resources.image_adjustment_results
+import org.meshtastic.core.resources.image_adjustment_milliseconds_value
 import org.meshtastic.core.resources.image_adjustment_number_of_chunks
 import org.meshtastic.core.resources.image_adjustment_preview
 import org.meshtastic.core.resources.image_adjustment_select_max_side_length
+import org.meshtastic.core.resources.image_adjustment_max_transmission_time
+import org.meshtastic.core.resources.image_adjustment_max_transmission_time_value
 import org.meshtastic.core.ui.component.SharedContactDialog
 import org.meshtastic.core.ui.component.smartScrollToIndex
 import org.meshtastic.core.ui.theme.AppTheme
@@ -166,7 +173,8 @@ private const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
 private const val IMAGE_CHUNK_MAX_LENGTH = 175
 private const val MIN_IMAGE_DUTY_CYCLE_PERCENT = 0.1f
 private const val DEFAULT_IMAGE_DUTY_CYCLE_PERCENT = 1.0f
-private const val DEFAULT_IMAGE_JPEG_QUALITY = 10
+private const val MAX_AUTO_IMAGE_JPEG_QUALITY = 90
+private const val TRANSMISSION_TIME_SLIDER_STEPS = 10
 
 private data class ModemAirtimeParams(
     val spreadFactor: Int,
@@ -285,6 +293,20 @@ private fun interChunkDelayMillisForDutyCycle(
     return (cycleMillis - packetAirtimeMillis).roundToInt().coerceAtLeast(0)
 }
 
+private fun estimateTransmissionMillisForChunks(
+    chunks: List<String>,
+    dutyCyclePercent: Float,
+    loraConfig: Config.LoRaConfig,
+): Int {
+    if (chunks.isEmpty()) {
+        return 0
+    }
+    val packetPayloadBytes = chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0
+    val packetAirtimeMillis = estimatePacketAirtimeMillis(packetPayloadBytes, loraConfig)
+    val delayMillis = interChunkDelayMillisForDutyCycle(dutyCyclePercent, packetAirtimeMillis)
+    return (chunks.size * packetAirtimeMillis) + ((chunks.size - 1).coerceAtLeast(0) * delayMillis)
+}
+
 private fun formatDutyCyclePercent(value: Float): String {
     val roundedTenths = (value * 10f).roundToInt() / 10f
     return if (roundedTenths % 1f == 0f) {
@@ -292,6 +314,15 @@ private fun formatDutyCyclePercent(value: Float): String {
     } else {
         "$roundedTenths%"
     }
+}
+
+private fun snapTransmissionTimeSeconds(value: Float, min: Float, max: Float): Float {
+    if (max <= min) {
+        return min
+    }
+    val stepSize = (max - min) / (TRANSMISSION_TIME_SLIDER_STEPS - 1)
+    val stepIndex = ((value - min) / stepSize).roundToInt().coerceIn(0, TRANSMISSION_TIME_SLIDER_STEPS - 1)
+    return min + (stepIndex * stepSize)
 }
 
 /**
@@ -1044,30 +1075,67 @@ private fun ImageAdjustmentDialog(
     imageUri: Uri,
     loraConfig: Config.LoRaConfig,
     selectedSize: Int,
-    selectedJpegQuality: Int,
+    selectedMaxTransmissionTimeSeconds: Float,
     selectedDutyCyclePercent: Float,
     onSizeChange: (Int) -> Unit,
-    onJpegQualityChange: (Int) -> Unit,
+    onMaxTransmissionTimeChange: (Float) -> Unit,
     onDutyCycleChange: (Float) -> Unit,
     onSend: (List<String>, Int) -> Unit,
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
     val sizes = listOf(32, 64, 128, 256, 512)
-    val qualityOptions = listOf(10, 30, 60, 80, 90)
+    var scaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var selectedJpegQuality by remember { mutableStateOf(0) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chunks by remember { mutableStateOf<List<String>>(emptyList()) }
     val regionMaxDutyCyclePercent = maxDutyCyclePercentForRegion(loraConfig.region)
     val boundedDutyCyclePercent = selectedDutyCyclePercent.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, regionMaxDutyCyclePercent)
-    val packetPayloadBytes = chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0
-    val packetAirtimeMillis = estimatePacketAirtimeMillis(packetPayloadBytes, loraConfig)
-    val selectedChunkDelayMillis = interChunkDelayMillisForDutyCycle(boundedDutyCyclePercent, packetAirtimeMillis)
-    val estimatedTransmissionMillis =
-        (chunks.size * packetAirtimeMillis) + ((chunks.size - 1).coerceAtLeast(0) * selectedChunkDelayMillis)
+    var minTransmissionSeconds by remember { mutableStateOf(0f) }
+    var maxTransmissionSeconds by remember { mutableStateOf(0f) }
+
+    val selectedChunkDelayMillis =
+        interChunkDelayMillisForDutyCycle(
+            boundedDutyCyclePercent,
+            estimatePacketAirtimeMillis(chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0, loraConfig),
+        )
+
+    val packetAirtimeMillis = estimatePacketAirtimeMillis(chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0, loraConfig)
+    val totalAirtimeMillis = chunks.size * packetAirtimeMillis
+    val estimatedTransmissionMillis = estimateTransmissionMillisForChunks(chunks, boundedDutyCyclePercent, loraConfig)
     val estimatedTransmissionSeconds = estimatedTransmissionMillis / 1000
     val estimatedTransmissionTimeText = DateUtils.formatElapsedTime(estimatedTransmissionSeconds.toLong())
+    val intervalText = stringResource(Res.string.image_adjustment_milliseconds_value, selectedChunkDelayMillis)
+    val packetAirtimeText = stringResource(Res.string.image_adjustment_milliseconds_value, packetAirtimeMillis)
+    val totalAirtimeText = stringResource(Res.string.image_adjustment_milliseconds_value, totalAirtimeMillis)
+    val actualDutyPercent =
+        if (estimatedTransmissionMillis > 0) {
+            (totalAirtimeMillis * 100f) / estimatedTransmissionMillis.toFloat()
+        } else {
+            0f
+        }
+    val actualDutyPercentText = formatDutyCyclePercent(actualDutyPercent)
+    val boundedSelectedMaxTransmissionTimeSeconds =
+        if (maxTransmissionSeconds > 0f) {
+            snapTransmissionTimeSeconds(
+                selectedMaxTransmissionTimeSeconds.coerceIn(minTransmissionSeconds, maxTransmissionSeconds),
+                minTransmissionSeconds,
+                maxTransmissionSeconds,
+            )
+        } else {
+            0f
+        }
+    val selectedMaxTransmissionTimeText =
+        DateUtils.formatElapsedTime(boundedSelectedMaxTransmissionTimeSeconds.roundToInt().toLong())
 
-    LaunchedEffect(imageUri, selectedSize, selectedJpegQuality) {
+    fun buildChunksForQuality(bitmap: Bitmap, quality: Int): List<String> {
+        val imageId = UUID.randomUUID().toString().take(8)
+        val outputStream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(0, 100), outputStream)
+        return buildImageChunks(imageId = imageId, jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true)
+    }
+
+    LaunchedEffect(imageUri, selectedSize) {
         withContext(Dispatchers.IO) {
             context.contentResolver.openInputStream(imageUri)?.use { input ->
                 val original: Bitmap? = BitmapFactory.decodeStream(input)
@@ -1075,22 +1143,80 @@ private fun ImageAdjustmentDialog(
                     val ratio = minOf(selectedSize.toFloat() / it.width, selectedSize.toFloat() / it.height)
                     val newWidth = (it.width * ratio).toInt()
                     val newHeight = (it.height * ratio).toInt()
-                    val scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
-
-                    // Encode to text payload and create chunks
-                    val imageId = UUID.randomUUID().toString().take(8)
-                    val baos = ByteArrayOutputStream()
-                    scaledBitmap.compress(Bitmap.CompressFormat.JPEG, selectedJpegQuality.coerceIn(1, 100), baos)
-                    val generatedChunks =
-                        buildImageChunks(
-                            imageId = imageId,
-                            jpegBytes = baos.toByteArray(),
-                            zipCompressionEnabled = true,
-                        )
-                    chunks = generatedChunks
-                    previewBitmap = decodeBitmapFromOutgoingChunks(generatedChunks)
+                    scaledBitmap = Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
                 }
             }
+        }
+    }
+
+    LaunchedEffect(
+        scaledBitmap,
+        selectedSize,
+        boundedDutyCyclePercent,
+        regionMaxDutyCyclePercent,
+        loraConfig,
+        selectedMaxTransmissionTimeSeconds,
+    ) {
+        val bitmap = scaledBitmap ?: return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            val chunksAtQuality0 = buildChunksForQuality(bitmap, 0)
+            val chunksAtQuality90 = buildChunksForQuality(bitmap, MAX_AUTO_IMAGE_JPEG_QUALITY)
+            val transmissionSecondsAt0 =
+                estimateTransmissionMillisForChunks(chunksAtQuality0, boundedDutyCyclePercent, loraConfig) / 1000f
+            val transmissionSecondsAt90 =
+                estimateTransmissionMillisForChunks(chunksAtQuality90, boundedDutyCyclePercent, loraConfig) / 1000f
+            val minSeconds = minOf(transmissionSecondsAt0, transmissionSecondsAt90)
+            val maxSeconds = maxOf(transmissionSecondsAt0, transmissionSecondsAt90)
+
+            minTransmissionSeconds = minSeconds
+            maxTransmissionSeconds = maxSeconds
+
+            val snappedSelectedSeconds =
+                if (selectedMaxTransmissionTimeSeconds <= 0f) {
+                    minSeconds
+                } else {
+                    snapTransmissionTimeSeconds(
+                        selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                        minSeconds,
+                        maxSeconds,
+                    )
+                }
+            if (selectedMaxTransmissionTimeSeconds != snappedSelectedSeconds) {
+                onMaxTransmissionTimeChange(snappedSelectedSeconds)
+            }
+
+            val targetSeconds =
+                if (selectedMaxTransmissionTimeSeconds <= 0f) {
+                    minSeconds
+                } else {
+                    snapTransmissionTimeSeconds(
+                        selectedMaxTransmissionTimeSeconds.coerceIn(minSeconds, maxSeconds),
+                        minSeconds,
+                        maxSeconds,
+                    )
+                }
+
+            var bestQuality = 0
+            var bestChunks = chunksAtQuality0
+            for (quality in MAX_AUTO_IMAGE_JPEG_QUALITY downTo 0) {
+                val candidateChunks =
+                    when (quality) {
+                        0 -> chunksAtQuality0
+                        MAX_AUTO_IMAGE_JPEG_QUALITY -> chunksAtQuality90
+                        else -> buildChunksForQuality(bitmap, quality)
+                    }
+                val candidateSeconds =
+                    estimateTransmissionMillisForChunks(candidateChunks, boundedDutyCyclePercent, loraConfig) / 1000f
+                if (candidateSeconds <= targetSeconds) {
+                    bestQuality = quality
+                    bestChunks = candidateChunks
+                    break
+                }
+            }
+
+            selectedJpegQuality = bestQuality
+            chunks = bestChunks
+            previewBitmap = decodeBitmapFromOutgoingChunks(bestChunks)
         }
     }
 
@@ -1100,7 +1226,6 @@ private fun ImageAdjustmentDialog(
             modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f).padding(16.dp)
         ) {
             val sizeOptionsScrollState = rememberScrollState()
-            val qualityOptionsScrollState = rememberScrollState()
             Column(
                 modifier = Modifier.padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1115,6 +1240,31 @@ private fun ImageAdjustmentDialog(
                 }
 
                 Spacer(modifier = Modifier.size(16.dp))
+
+                Text(stringResource(Res.string.image_adjustment_duty_cycle))
+                Text(
+                    stringResource(
+                        Res.string.image_adjustment_duty_cycle_summary,
+                        formatDutyCyclePercent(boundedDutyCyclePercent),
+                        formatDutyCyclePercent(regionMaxDutyCyclePercent),
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    stringResource(Res.string.image_adjustment_duty_cycle_value, formatDutyCyclePercent(boundedDutyCyclePercent)),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    stringResource(Res.string.image_adjustment_duty_cycle_max, formatDutyCyclePercent(regionMaxDutyCyclePercent)),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Slider(
+                    value = boundedDutyCyclePercent,
+                    onValueChange = { value ->
+                        onDutyCycleChange(value)
+                    },
+                    valueRange = MIN_IMAGE_DUTY_CYCLE_PERCENT..regionMaxDutyCyclePercent,
+                )
 
                 Text(stringResource(Res.string.image_adjustment_select_max_side_length))
 
@@ -1135,52 +1285,46 @@ private fun ImageAdjustmentDialog(
                     }
                 }
 
-                Text(stringResource(Res.string.image_adjustment_jpeg_quality))
+                Text(stringResource(Res.string.image_adjustment_max_transmission_time))
                 Text(
-                    stringResource(Res.string.image_adjustment_jpeg_quality_value, selectedJpegQuality),
+                    stringResource(
+                        Res.string.image_adjustment_max_transmission_time_value,
+                        selectedMaxTransmissionTimeText,
+                    ),
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(qualityOptionsScrollState),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    qualityOptions.forEach { quality ->
-                        if (selectedJpegQuality == quality) {
-                            Button(onClick = { onJpegQualityChange(quality) }) {
-                                Text("$quality%")
-                            }
-                        } else {
-                            OutlinedButton(onClick = { onJpegQualityChange(quality) }) {
-                                Text("$quality%")
-                            }
-                        }
-                    }
+                if (maxTransmissionSeconds > 0f) {
+                    Slider(
+                        value = boundedSelectedMaxTransmissionTimeSeconds,
+                        onValueChange = { value ->
+                            onMaxTransmissionTimeChange(
+                                snapTransmissionTimeSeconds(value, minTransmissionSeconds, maxTransmissionSeconds)
+                            )
+                        },
+                        steps = TRANSMISSION_TIME_SLIDER_STEPS - 2,
+                        valueRange = minTransmissionSeconds..maxTransmissionSeconds,
+                    )
                 }
-
-                Text(stringResource(Res.string.image_adjustment_duty_cycle))
-                Text(
-                    stringResource(Res.string.image_adjustment_duty_cycle_value, formatDutyCyclePercent(boundedDutyCyclePercent)),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    stringResource(Res.string.image_adjustment_duty_cycle_max, formatDutyCyclePercent(regionMaxDutyCyclePercent)),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Slider(
-                    value = boundedDutyCyclePercent,
-                    onValueChange = { value ->
-                        onDutyCycleChange(value)
-                    },
-                    valueRange = MIN_IMAGE_DUTY_CYCLE_PERCENT..regionMaxDutyCyclePercent,
-                )
 
                 Spacer(modifier = Modifier.size(8.dp))
 
-                Text(stringResource(Res.string.image_adjustment_number_of_chunks, chunks.size))
+                Text(stringResource(Res.string.image_adjustment_results))
                 Text(
                     stringResource(
-                        Res.string.image_adjustment_estimated_transmission_time,
+                        Res.string.image_adjustment_result_line_primary,
+                        chunks.size,
+                        selectedJpegQuality,
                         estimatedTransmissionTimeText,
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    stringResource(
+                        Res.string.image_adjustment_result_line_secondary,
+                        intervalText,
+                        packetAirtimeText,
+                        totalAirtimeText,
+                        actualDutyPercentText,
                     ),
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -1253,7 +1397,7 @@ private fun MessageInput(
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
 
     var selectedSize by remember { mutableStateOf(32) }
-    var selectedJpegQuality by remember { mutableStateOf(DEFAULT_IMAGE_JPEG_QUALITY) }
+    var selectedMaxTransmissionTimeSeconds by remember { mutableStateOf(0f) }
     var selectedDutyCyclePercent by remember {
         mutableStateOf(
             DEFAULT_IMAGE_DUTY_CYCLE_PERCENT.coerceAtMost(maxDutyCyclePercentForRegion(loraConfig.region))
@@ -1359,10 +1503,10 @@ private fun MessageInput(
             imageUri = uri,
             loraConfig = loraConfig,
             selectedSize = selectedSize,
-            selectedJpegQuality = selectedJpegQuality,
+            selectedMaxTransmissionTimeSeconds = selectedMaxTransmissionTimeSeconds,
             selectedDutyCyclePercent = selectedDutyCyclePercent,
             onSizeChange = { selectedSize = it },
-            onJpegQualityChange = { selectedJpegQuality = it.coerceIn(1, 100) },
+            onMaxTransmissionTimeChange = { selectedMaxTransmissionTimeSeconds = it },
             onDutyCycleChange = {
                 selectedDutyCyclePercent =
                     it.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, maxDutyCyclePercentForRegion(loraConfig.region))
