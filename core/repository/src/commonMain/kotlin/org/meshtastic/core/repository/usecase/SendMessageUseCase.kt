@@ -28,7 +28,9 @@ import org.meshtastic.core.repository.HomoglyphPrefs
 import org.meshtastic.core.repository.MessageQueue
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.PacketRepository
+import org.meshtastic.proto.PortNum
 import org.meshtastic.proto.Config
+import okio.ByteString.Companion.toByteString
 import kotlin.random.Random
 
 /**
@@ -95,25 +97,53 @@ class SendMessageUseCase(
                 text
             }
 
+        enqueuePacket(
+            packet =
+                DataPacket(dest, channel ?: 0, finalMessageText, replyId).apply {
+                    from = fromId
+                    status = MessageStatus.QUEUED
+                },
+            contactKey = contactKey,
+            myNodeNum = ourNode?.num ?: 0,
+        )
+    }
+
+    suspend fun sendPrivateAppPayload(
+        payload: ByteArray,
+        contactKey: String = "0${DataPacket.ID_BROADCAST}",
+    ) {
+        val channel = contactKey[0].digitToIntOrNull()
+        val dest = if (channel != null) contactKey.substring(1) else contactKey
+
+        val ourNode = nodeRepository.ourNodeInfo.value
+        val fromId = ourNode?.user?.id ?: DataPacket.ID_LOCAL
+
+        enqueuePacket(
+            packet =
+                DataPacket(
+                    to = dest,
+                    bytes = payload.toByteString(),
+                    dataType = PortNum.PRIVATE_APP.value,
+                    channel = channel ?: 0,
+                ).apply {
+                    from = fromId
+                    status = MessageStatus.QUEUED
+                },
+            contactKey = contactKey,
+            myNodeNum = ourNode?.num ?: 0,
+        )
+    }
+
+    private suspend fun enqueuePacket(packet: DataPacket, contactKey: String, myNodeNum: Int) {
         val packetId = Random.nextInt(1, Int.MAX_VALUE)
-
-        val packet =
-            DataPacket(dest, channel ?: 0, finalMessageText, replyId).apply {
-                from = fromId
-                id = packetId
-                status = MessageStatus.QUEUED
-            }
-
+        packet.id = packetId
         try {
-            // Write to the DB to immediately reflect the queued state on the UI
             packetRepository.savePacket(
-                myNodeNum = ourNode?.num ?: 0,
+                myNodeNum = myNodeNum,
                 contactKey = contactKey,
                 packet = packet,
                 receivedTime = nowMillis,
             )
-
-            // Enqueue for durable transmission via the platform-specific queue
             messageQueue.enqueue(packetId)
         } catch (ex: Exception) {
             Logger.e(ex) { "Failed to enqueue message packet" }

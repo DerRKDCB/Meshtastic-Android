@@ -30,6 +30,8 @@ import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
 import org.meshtastic.core.model.util.getShortDateTime
+import org.meshtastic.proto.ChunkedPayload
+import org.meshtastic.proto.PortNum
 
 data class PacketEntity(
     @Embedded val packet: Packet,
@@ -39,12 +41,23 @@ data class PacketEntity(
     suspend fun toMessage(getNode: suspend (userId: String?) -> Node) = with(packet) {
         val node = getNode(data.from)
         val isFromLocal = node.user.id == DataPacket.ID_LOCAL || (myNodeNum != 0 && node.num == myNodeNum)
+        val privateChunkPayload =
+            if (data.dataType == PortNum.PRIVATE_APP.value) {
+                data.bytes?.let { payloadBytes -> runCatching { ChunkedPayload.ADAPTER.decode(payloadBytes) }.getOrNull() }
+            } else {
+                null
+            }
         Message(
             uuid = uuid,
             receivedTime = received_time,
             node = node,
             fromLocal = isFromLocal,
-            text = data.text.orEmpty(),
+            text =
+                if (data.dataType == PortNum.PRIVATE_APP.value && data.text.isNullOrEmpty()) {
+                    "[Image]"
+                } else {
+                    data.text.orEmpty()
+                },
             time = getShortDateTime(data.time),
             snr = snr,
             rssi = rssi,
@@ -60,6 +73,11 @@ data class PacketEntity(
             relays = data.relays,
             filtered = filtered,
             transportMechanism = data.transportMechanism,
+            dataType = data.dataType,
+            privatePayloadId = privateChunkPayload?.payload_id,
+            privateChunkIndex = privateChunkPayload?.chunk_index,
+            privateChunkCount = privateChunkPayload?.chunk_count,
+            privateChunkBytes = privateChunkPayload?.payload_chunk?.toByteArray(),
         )
     }
 }

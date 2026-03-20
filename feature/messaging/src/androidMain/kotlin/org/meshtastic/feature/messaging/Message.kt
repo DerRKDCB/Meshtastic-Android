@@ -63,7 +63,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.util.Base64
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
-import java.util.UUID
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import androidx.compose.foundation.Image
@@ -115,6 +114,7 @@ import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.RegionInfo
 import org.meshtastic.core.model.util.getChannel
 import org.meshtastic.proto.Config
+import org.meshtastic.proto.ChunkedPayload
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.close
 import org.meshtastic.core.resources.decode_image
@@ -157,6 +157,7 @@ import org.meshtastic.feature.messaging.component.QuickChatRow
 import org.meshtastic.feature.messaging.component.ReplySnippet
 import org.meshtastic.feature.messaging.component.ScrollToBottomFab
 import java.nio.charset.StandardCharsets
+import okio.ByteString.Companion.toByteString
 import kotlin.math.ceil
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -165,7 +166,7 @@ import kotlin.math.sqrt
 private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
 private const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
-private const val IMAGE_CHUNK_MAX_LENGTH = 175
+private const val IMAGE_CHUNK_PAYLOAD_BYTES = 150
 private const val MIN_IMAGE_DUTY_CYCLE_PERCENT = 0.1f
 private const val DEFAULT_IMAGE_DUTY_CYCLE_PERCENT = 1.0f
 private const val MAX_AUTO_IMAGE_JPEG_QUALITY = 90
@@ -289,14 +290,14 @@ private fun interChunkDelayMillisForDutyCycle(
 }
 
 private fun estimateTransmissionMillisForChunks(
-    chunks: List<String>,
+    chunks: List<ByteArray>,
     dutyCyclePercent: Float,
     loraConfig: Config.LoRaConfig,
 ): Int {
     if (chunks.isEmpty()) {
         return 0
     }
-    val packetPayloadBytes = chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0
+    val packetPayloadBytes = chunks.maxOfOrNull { it.size } ?: 0
     val packetAirtimeMillis = estimatePacketAirtimeMillis(packetPayloadBytes, loraConfig)
     val delayMillis = interChunkDelayMillisForDutyCycle(dutyCyclePercent, packetAirtimeMillis)
     return (chunks.size * packetAirtimeMillis) + ((chunks.size - 1).coerceAtLeast(0) * delayMillis)
@@ -716,7 +717,6 @@ fun MessageScreen(
                             onEvent(MessageScreenEvent.SendMessage(messageText, replyingToPacketId))
                         }
                     },
-                    onSendChunk = { chunk -> onEvent(MessageScreenEvent.SendMessage(chunk, null)) },
                     onStopSendingChunks = viewModel::stopSendingChunks,
                     viewModel = viewModel,
                     contactKey = contactKey
@@ -883,61 +883,68 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
         }
 }
 
-private fun buildImageChunks(
-    imageId: String,
+private fun buildChunkedPayloadPackets(
     jpegBytes: ByteArray,
     zipCompressionEnabled: Boolean = true,
-    maxChunkLength: Int = IMAGE_CHUNK_MAX_LENGTH,
-): List<String> {
+    chunkPayloadBytes: Int = IMAGE_CHUNK_PAYLOAD_BYTES,
+): List<ByteArray> {
     val payloadBytes = maybeGzip(jpegBytes, zipCompressionEnabled)
-    val base64 = Base64.encodeToString(payloadBytes, Base64.NO_WRAP)
-    if (base64.isEmpty()) return emptyList()
-
-    var totalPartsGuess = 1
-    repeat(6) {
-        val chunks = mutableListOf<String>()
-        var cursor = 0
-        var partIndex = 1
-
-        while (cursor < base64.length) {
-            val header = "IMG:$imageId|$partIndex/$totalPartsGuess|"
-            val maxDataLength = maxChunkLength - header.length
-            if (maxDataLength <= 0) return emptyList()
-
-            val nextCursor = (cursor + maxDataLength).coerceAtMost(base64.length)
-            chunks += "$header${base64.substring(cursor, nextCursor)}"
-            cursor = nextCursor
-            partIndex++
-        }
-
-        val actualParts = chunks.size
-        if (actualParts == totalPartsGuess) {
-            return chunks
-        }
-        totalPartsGuess = actualParts
+    if (payloadBytes.isEmpty()) {
+        return emptyList()
     }
-
-    return emptyList()
+    val totalParts = ((payloadBytes.size + chunkPayloadBytes - 1) / chunkPayloadBytes).coerceAtLeast(1)
+    val payloadId = kotlin.random.Random.nextInt(1, Int.MAX_VALUE)
+    val chunks = mutableListOf<ByteArray>()
+    var offset = 0
+    var partIndex = 1
+    while (offset < payloadBytes.size) {
+        val nextOffset = (offset + chunkPayloadBytes).coerceAtMost(payloadBytes.size)
+        val packet =
+            ChunkedPayload(
+                payload_id = payloadId,
+                chunk_count = totalParts,
+                chunk_index = partIndex,
+                payload_chunk = payloadBytes.copyOfRange(offset, nextOffset).toByteString(),
+            )
+        chunks += ChunkedPayload.ADAPTER.encode(packet)
+        offset = nextOffset
+        partIndex++
+    }
+    return chunks
 }
 
-private fun decodeBitmapFromOutgoingChunks(chunks: List<String>): Bitmap? {
+private fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bitmap? {
     if (chunks.isEmpty()) return null
-    val parsedChunks = chunks.mapNotNull(::parseImageChunk)
-    if (parsedChunks.size != chunks.size) return null
+    val decodedChunks =
+        chunks.mapNotNull { chunkBytes ->
+            runCatching { ChunkedPayload.ADAPTER.decode(chunkBytes.toByteString()) }.getOrNull()
+        }
+    if (decodedChunks.size != chunks.size) return null
 
-    val firstChunk = parsedChunks.firstOrNull() ?: return null
-    val imageId = firstChunk.imageId
-    val totalParts = firstChunk.totalParts
-    val partsByIndex = mutableMapOf<Int, String>()
+    val firstChunk = decodedChunks.firstOrNull() ?: return null
+    val payloadId = firstChunk.payload_id
+    val totalParts = firstChunk.chunk_count
+    val partsByIndex = mutableMapOf<Int, ByteArray>()
 
-    parsedChunks.forEach { chunk ->
-        if (chunk.imageId != imageId || chunk.totalParts != totalParts) {
+    decodedChunks.forEach { chunk ->
+        if (chunk.payload_id != payloadId || chunk.chunk_count != totalParts) {
             return null
         }
-        partsByIndex[chunk.partIndex] = chunk.payload
+        partsByIndex[chunk.chunk_index] = chunk.payload_chunk.toByteArray()
     }
 
-    return decodeBitmapFromChunks(partsByIndex = partsByIndex, totalParts = totalParts)
+    val payload =
+        (1..totalParts)
+            .mapNotNull { partIndex -> partsByIndex[partIndex] }
+            .fold(ByteArrayOutputStream()) { stream, part ->
+                stream.apply { write(part) }
+            }
+            .toByteArray()
+    if (payload.isEmpty()) {
+        return null
+    }
+    val imageBytes = maybeGunzip(payload)
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
 }
 
 @Composable
@@ -1091,7 +1098,7 @@ private fun ImageAdjustmentDialog(
     onSizeChange: (Int) -> Unit,
     onMaxTransmissionTimeChange: (Float) -> Unit,
     onDutyCycleChange: (Float) -> Unit,
-    onSend: (List<String>, Int) -> Unit,
+    onSend: (List<ByteArray>, Int) -> Unit,
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -1099,7 +1106,7 @@ private fun ImageAdjustmentDialog(
     var scaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var selectedJpegQuality by remember { mutableStateOf(0) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var chunks by remember { mutableStateOf<List<String>>(emptyList()) }
+    var chunks by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
     val regionMaxDutyCyclePercent = maxDutyCyclePercentForRegion(loraConfig.region)
     val boundedDutyCyclePercent = selectedDutyCyclePercent.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, regionMaxDutyCyclePercent)
     var minTransmissionSeconds by remember { mutableStateOf(0f) }
@@ -1108,10 +1115,10 @@ private fun ImageAdjustmentDialog(
     val selectedChunkDelayMillis =
         interChunkDelayMillisForDutyCycle(
             boundedDutyCyclePercent,
-            estimatePacketAirtimeMillis(chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0, loraConfig),
+            estimatePacketAirtimeMillis(chunks.maxOfOrNull { it.size } ?: 0, loraConfig),
         )
 
-    val packetAirtimeMillis = estimatePacketAirtimeMillis(chunks.maxOfOrNull { it.encodeToByteArray().size } ?: 0, loraConfig)
+    val packetAirtimeMillis = estimatePacketAirtimeMillis(chunks.maxOfOrNull { it.size } ?: 0, loraConfig)
     val totalAirtimeMillis = chunks.size * packetAirtimeMillis
     val estimatedTransmissionMillis = estimateTransmissionMillisForChunks(chunks, boundedDutyCyclePercent, loraConfig)
     val estimatedTransmissionSeconds = estimatedTransmissionMillis / 1000
@@ -1147,11 +1154,10 @@ private fun ImageAdjustmentDialog(
     val selectedMaxTransmissionTimeText =
         DateUtils.formatElapsedTime(boundedSelectedMaxTransmissionTimeSeconds.roundToInt().toLong())
 
-    fun buildChunksForQuality(bitmap: Bitmap, quality: Int): List<String> {
-        val imageId = UUID.randomUUID().toString().take(8)
+    fun buildChunksForQuality(bitmap: Bitmap, quality: Int): List<ByteArray> {
         val outputStream = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(0, 100), outputStream)
-        return buildImageChunks(imageId = imageId, jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true)
+        return buildChunkedPayloadPackets(jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true)
     }
 
     LaunchedEffect(imageUri, selectedSize) {
@@ -1247,7 +1253,7 @@ private fun ImageAdjustmentDialog(
 
             selectedJpegQuality = bestQuality
             chunks = bestChunks
-            previewBitmap = decodeBitmapFromOutgoingChunks(bestChunks)
+            previewBitmap = decodeBitmapFromOutgoingChunkedPayloads(bestChunks)
         }
     }
 
@@ -1400,7 +1406,6 @@ private fun MessageInput(
     onSendMessage: () -> Unit,
     viewModel: MessageViewModel?,
     contactKey: String,
-    onSendChunk: ((String) -> Unit)? = null,
     onStopSendingChunks: () -> Unit = {},
 ) {
     val currentTextRaw = textFieldState.text.toString()
@@ -1531,8 +1536,6 @@ private fun MessageInput(
         }
     }
 
-    val coroutineScope = rememberCoroutineScope()
-
     selectedImageUri?.let { uri ->
         ImageAdjustmentDialog(
             imageUri = uri,
@@ -1549,22 +1552,11 @@ private fun MessageInput(
             onSend = { chunks, delayMillis ->
                 selectedImageUri = null
                 if (viewModel != null) {
-                    viewModel.sendMessageChunks(
+                    viewModel.sendChunkedPayloadChunks(
                         chunks = chunks,
                         contactKey = contactKey,
                         delayMillis = delayMillis,
                     )
-                } else {
-                    coroutineScope.launch {
-                        if (onSendChunk != null && chunks.isNotEmpty()) {
-                            chunks.forEachIndexed { index, chunk ->
-                                onSendChunk(chunk)
-                                if (index < chunks.lastIndex) {
-                                    kotlinx.coroutines.delay(delayMillis.toLong())
-                                }
-                            }
-                        }
-                    }
                 }
             },
             onCancel = { selectedImageUri = null }

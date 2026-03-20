@@ -16,6 +16,7 @@
  */
 package org.meshtastic.feature.messaging
 
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -38,6 +39,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedback
@@ -55,6 +58,10 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import org.meshtastic.proto.PortNum
+import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
+import java.util.zip.GZIPInputStream
 import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
@@ -63,6 +70,82 @@ import org.meshtastic.feature.messaging.component.MessageItem
 import org.meshtastic.feature.messaging.component.MessageStatusDialog
 import org.meshtastic.feature.messaging.component.ReactionDialog
 import org.meshtastic.feature.messaging.component.UnreadMessagesDivider
+
+private data class TimelinePrivateImageRenderState(
+    val imageByMessageUuid: Map<Long, ImageBitmap>,
+    val hiddenChunkMessageUuids: Set<Long>,
+)
+
+private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
+    if (inputBytes.size < 2) return inputBytes
+    val isGzip = inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
+    if (!isGzip) return inputBytes
+    return runCatching {
+        ByteArrayInputStream(inputBytes).use { byteInput ->
+            GZIPInputStream(byteInput).use { gzipInput ->
+                gzipInput.readBytes()
+            }
+        }
+    }.getOrDefault(inputBytes)
+}
+
+private fun buildPrivateImageRenderState(messages: List<Message>): TimelinePrivateImageRenderState {
+    data class ChunkMessage(val message: Message, val payloadId: Int, val index: Int, val count: Int, val bytes: ByteArray)
+
+    val chunkMessages =
+        messages.mapNotNull { message ->
+            val payloadId = message.privatePayloadId
+            val chunkIndex = message.privateChunkIndex
+            val chunkCount = message.privateChunkCount
+            val chunkBytes = message.privateChunkBytes
+            if (
+                message.dataType == PortNum.PRIVATE_APP.value &&
+                    payloadId != null &&
+                    chunkIndex != null &&
+                    chunkCount != null &&
+                    chunkBytes != null
+            ) {
+                ChunkMessage(message, payloadId, chunkIndex, chunkCount, chunkBytes)
+            } else {
+                null
+            }
+        }
+
+    if (chunkMessages.isEmpty()) {
+        return TimelinePrivateImageRenderState(emptyMap(), emptySet())
+    }
+
+    val imageByMessageUuid = mutableMapOf<Long, ImageBitmap>()
+    val hiddenChunkMessageUuids = mutableSetOf<Long>()
+
+    chunkMessages.groupBy { it.payloadId }.values.forEach { group ->
+        val expectedCount = group.firstOrNull()?.count ?: return@forEach
+        val chunksByIndex = group.associateBy { it.index }
+        val hasCompletePayload = (1..expectedCount).all { chunkIndex -> chunksByIndex.containsKey(chunkIndex) }
+        if (!hasCompletePayload) {
+            return@forEach
+        }
+
+        val payloadBytes =
+            ByteArrayOutputStream().use { output ->
+                (1..expectedCount)
+                    .mapNotNull { chunkIndex -> chunksByIndex[chunkIndex]?.bytes }
+                    .forEach { chunkBytes -> output.write(chunkBytes) }
+                output.toByteArray()
+            }
+        val imageBytes = maybeGunzip(payloadBytes)
+        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+        if (bitmap != null) {
+            val renderedMessage = group.maxByOrNull { it.index }?.message
+            if (renderedMessage != null) {
+                imageByMessageUuid[renderedMessage.uuid] = bitmap.asImageBitmap()
+                group.filter { it.message.uuid != renderedMessage.uuid }.forEach { hiddenChunkMessageUuids += it.message.uuid }
+            }
+        }
+    }
+
+    return TimelinePrivateImageRenderState(imageByMessageUuid, hiddenChunkMessageUuids)
+}
 
 internal data class MessageListHandlers(
     val onUnreadChanged: (Long, Long) -> Unit,
@@ -187,6 +270,16 @@ private fun MessageListPagedContent(
     modifier: Modifier = Modifier,
     quickEmojis: List<String>,
 ) {
+    val privateImageRenderState by
+        remember(state.messages.itemCount) {
+            derivedStateOf {
+                val snapshotMessages =
+                    state.messages.itemSnapshotList.items
+                        .filterNotNull()
+                buildPrivateImageRenderState(snapshotMessages)
+            }
+        }
+
     // Calculate unread divider position using snapshot to avoid side-effects and improve performance
     // Optimized: Use full snapshot index to correctly match LazyColumn index range
     val unreadDividerIndex by
@@ -232,7 +325,7 @@ private fun MessageListPagedContent(
                         false
                     }
 
-                if (message != null) {
+                if (message != null && message.uuid !in privateImageRenderState.hiddenChunkMessageUuids) {
                     val isFirstUnread = state.hasUnreadMessages && unreadDividerIndex == index
                     val itemModifier = if (enableAnimations) Modifier.animateItem() else Modifier
 
@@ -243,6 +336,7 @@ private fun MessageListPagedContent(
                             UnreadMessagesDivider()
                             RenderPagedChatMessageRow(
                                 message = message,
+                                inlineImageBitmap = privateImageRenderState.imageByMessageUuid[message.uuid],
                                 state = state,
                                 nodeMap = nodeMap,
                                 handlers = handlers,
@@ -261,6 +355,7 @@ private fun MessageListPagedContent(
                     } else {
                         RenderPagedChatMessageRow(
                             message = message,
+                            inlineImageBitmap = privateImageRenderState.imageByMessageUuid[message.uuid],
                             state = state,
                             nodeMap = nodeMap,
                             handlers = handlers,
@@ -303,6 +398,7 @@ private fun MessageListPagedContent(
 @Composable
 private fun RenderPagedChatMessageRow(
     message: Message,
+    inlineImageBitmap: ImageBitmap?,
     state: MessageListPagedState,
     nodeMap: Map<Int, Node>,
     handlers: MessageListHandlers,
@@ -330,6 +426,7 @@ private fun RenderPagedChatMessageRow(
         node = node,
         ourNode = ourNode,
         message = message,
+        inlineImageBitmap = inlineImageBitmap,
         selected = selected,
         inSelectionMode = inSelectionMode,
         onClick = { if (inSelectionMode) state.selectedIds.toggle(message.uuid) },
