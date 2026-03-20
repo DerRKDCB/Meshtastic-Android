@@ -1112,14 +1112,22 @@ private fun MessageInput(
             },
             onSend = { chunks, delayMillis ->
                 selectedImageUri = null
-                coroutineScope.launch {
-                    if (onSendChunk != null && chunks.isNotEmpty()) {
-                        val boundedDelayMillis =
-                            delayMillis.coerceIn(MIN_IMAGE_CHUNK_DELAY_MILLIS, MAX_IMAGE_CHUNK_DELAY_MILLIS)
-                        chunks.forEachIndexed { index, chunk ->
-                            onSendChunk(chunk)
-                            if (index < chunks.lastIndex) {
-                                kotlinx.coroutines.delay(boundedDelayMillis.toLong())
+                val boundedDelayMillis =
+                    delayMillis.coerceIn(MIN_IMAGE_CHUNK_DELAY_MILLIS, MAX_IMAGE_CHUNK_DELAY_MILLIS)
+                if (viewModel != null) {
+                    viewModel.sendMessageChunks(
+                        chunks = chunks,
+                        contactKey = contactKey,
+                        delayMillis = boundedDelayMillis,
+                    )
+                } else {
+                    coroutineScope.launch {
+                        if (onSendChunk != null && chunks.isNotEmpty()) {
+                            chunks.forEachIndexed { index, chunk ->
+                                onSendChunk(chunk)
+                                if (index < chunks.lastIndex) {
+                                    kotlinx.coroutines.delay(boundedDelayMillis.toLong())
+                                }
                             }
                         }
                     }
