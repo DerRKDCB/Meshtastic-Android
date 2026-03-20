@@ -906,7 +906,7 @@ private fun ImageAdjustmentDialog(
 ) {
     val context = LocalContext.current
     val sizes = listOf(32, 64, 128, 256, 512)
-    val qualityOptions = listOf(50, 60, 70, 80, 90)
+    val qualityOptions = listOf(10, 30, 60, 80, 90)
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chunks by remember { mutableStateOf<List<String>>(emptyList()) }
 
