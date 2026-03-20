@@ -46,6 +46,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -85,6 +86,7 @@ import org.meshtastic.proto.PortNum
 import java.io.ByteArrayOutputStream
 import java.io.ByteArrayInputStream
 import java.util.zip.GZIPInputStream
+import java.util.zip.Inflater
 import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
@@ -99,26 +101,116 @@ private data class TimelinePrivateImageRenderState(
     val hiddenChunkMessageUuids: Set<Long>,
 )
 
+private data class PrivateImageDecodeCacheEntry(
+    val bitmap: Bitmap?,
+    val attemptedChunkCount: Int,
+)
+
 private data class TimelinePrivateImageMessageData(
     val bitmap: Bitmap?,
     val availableChunks: Int,
     val totalChunks: Int,
 )
 
-private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
-    if (inputBytes.size < 2) return inputBytes
-    val isGzip = inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
-    if (!isGzip) return inputBytes
+private fun isGzipPayload(inputBytes: ByteArray): Boolean {
+    return inputBytes.size >= 2 && inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
+}
+
+private fun gzipDataOffset(inputBytes: ByteArray): Int? {
+    if (!isGzipPayload(inputBytes) || inputBytes.size < 10) {
+        return null
+    }
+
+    val flags = inputBytes[3].toInt() and 0xFF
+    var offset = 10
+
+    if ((flags and 0x04) != 0) {
+        if (offset + 2 > inputBytes.size) return null
+        val extraLength = (inputBytes[offset].toInt() and 0xFF) or ((inputBytes[offset + 1].toInt() and 0xFF) shl 8)
+        offset += 2 + extraLength
+    }
+
+    if ((flags and 0x08) != 0) {
+        while (offset < inputBytes.size && inputBytes[offset] != 0.toByte()) {
+            offset++
+        }
+        offset++
+    }
+
+    if ((flags and 0x10) != 0) {
+        while (offset < inputBytes.size && inputBytes[offset] != 0.toByte()) {
+            offset++
+        }
+        offset++
+    }
+
+    if ((flags and 0x02) != 0) {
+        offset += 2
+    }
+
+    return offset.takeIf { it in 0..inputBytes.size }
+}
+
+private fun gunzipStrict(inputBytes: ByteArray): ByteArray? {
+    if (!isGzipPayload(inputBytes)) {
+        return null
+    }
     return runCatching {
         ByteArrayInputStream(inputBytes).use { byteInput ->
             GZIPInputStream(byteInput).use { gzipInput ->
                 gzipInput.readBytes()
             }
         }
-    }.getOrDefault(inputBytes)
+    }.getOrNull()
 }
 
-private fun buildPrivateImageRenderState(messages: List<Message>): TimelinePrivateImageRenderState {
+private fun gunzipBestEffortPartial(inputBytes: ByteArray): ByteArray? {
+    val dataOffset = gzipDataOffset(inputBytes) ?: return null
+    val inflater = Inflater(true)
+    return runCatching {
+        inflater.setInput(inputBytes, dataOffset, inputBytes.size - dataOffset)
+        ByteArrayOutputStream().use { output ->
+            val buffer = ByteArray(8192)
+            while (!inflater.finished()) {
+                val inflated = inflater.inflate(buffer)
+                if (inflated > 0) {
+                    output.write(buffer, 0, inflated)
+                } else {
+                    break
+                }
+            }
+            output.toByteArray().takeIf { it.isNotEmpty() }
+        }
+    }.getOrNull().also {
+        inflater.end()
+    }
+}
+
+private fun decodeBitmapBestEffort(payloadBytes: ByteArray): Bitmap? {
+    if (payloadBytes.isEmpty()) {
+        return null
+    }
+
+    val candidates = mutableListOf<ByteArray>()
+    candidates += payloadBytes
+
+    gunzipStrict(payloadBytes)?.let { candidates += it }
+    gunzipBestEffortPartial(payloadBytes)?.let { candidates += it }
+
+    candidates.forEach { candidateBytes ->
+        BitmapFactory.decodeByteArray(candidateBytes, 0, candidateBytes.size)?.let { return it }
+
+        val withEoi = candidateBytes + byteArrayOf(0xFF.toByte(), 0xD9.toByte())
+        BitmapFactory.decodeByteArray(withEoi, 0, withEoi.size)?.let { return it }
+    }
+
+    return null
+}
+
+private fun buildPrivateImageRenderState(
+    messages: List<Message>,
+    decodeCache: MutableMap<String, PrivateImageDecodeCacheEntry>,
+): TimelinePrivateImageRenderState {
     data class ChunkMessage(val message: Message, val payloadId: Int, val index: Int, val count: Int, val bytes: ByteArray)
 
     val chunkMessages =
@@ -150,21 +242,38 @@ private fun buildPrivateImageRenderState(messages: List<Message>): TimelinePriva
     chunkMessages.groupBy { it.payloadId }.values.forEach { group ->
         val expectedCount = group.firstOrNull()?.count ?: return@forEach
         val chunksByIndex = group.associateBy { it.index }
-        val payloadBytes =
-            ByteArrayOutputStream().use { output ->
-                chunksByIndex.keys.sorted()
-                    .mapNotNull { chunkIndex -> chunksByIndex[chunkIndex]?.bytes }
-                    .forEach { chunkBytes -> output.write(chunkBytes) }
-                output.toByteArray()
+        val availableChunks = chunksByIndex.size
+        val payloadId = group.firstOrNull()?.payloadId ?: return@forEach
+        val senderNum = group.firstOrNull()?.message?.node?.num ?: 0
+        val cacheKey = "$senderNum:$payloadId"
+        val cachedEntry = decodeCache[cacheKey]
+
+        val shouldRetryDecode = cachedEntry == null || availableChunks > cachedEntry.attemptedChunkCount
+        val bitmap =
+            if (shouldRetryDecode) {
+                val payloadBytes =
+                    ByteArrayOutputStream().use { output ->
+                        chunksByIndex.keys.sorted()
+                            .mapNotNull { chunkIndex -> chunksByIndex[chunkIndex]?.bytes }
+                            .forEach { chunkBytes -> output.write(chunkBytes) }
+                        output.toByteArray()
+                    }
+                decodeBitmapBestEffort(payloadBytes).also { decodedBitmap ->
+                    decodeCache[cacheKey] =
+                        PrivateImageDecodeCacheEntry(
+                            bitmap = decodedBitmap,
+                            attemptedChunkCount = availableChunks,
+                        )
+                }
+            } else {
+                cachedEntry.bitmap
             }
-        val imageBytes = maybeGunzip(payloadBytes)
-        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
         val renderedMessage = group.maxByOrNull { it.index }?.message
         if (renderedMessage != null) {
             imageByMessageUuid[renderedMessage.uuid] =
                 TimelinePrivateImageMessageData(
                     bitmap = bitmap,
-                    availableChunks = chunksByIndex.size,
+                    availableChunks = availableChunks,
                     totalChunks = expectedCount,
                 )
             group.filter { it.message.uuid != renderedMessage.uuid }.forEach { hiddenChunkMessageUuids += it.message.uuid }
@@ -352,13 +461,15 @@ private fun MessageListPagedContent(
     modifier: Modifier = Modifier,
     quickEmojis: List<String>,
 ) {
+    val privateImageDecodeCache = remember { mutableStateMapOf<String, PrivateImageDecodeCacheEntry>() }
+
     val privateImageRenderState by
         remember(state.messages.itemCount) {
             derivedStateOf {
                 val snapshotMessages =
                     state.messages.itemSnapshotList.items
                         .filterNotNull()
-                buildPrivateImageRenderState(snapshotMessages)
+                buildPrivateImageRenderState(snapshotMessages, privateImageDecodeCache)
             }
         }
 
