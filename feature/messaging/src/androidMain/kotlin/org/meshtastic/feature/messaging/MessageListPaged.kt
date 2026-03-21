@@ -47,7 +47,6 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -502,7 +501,7 @@ private fun MessageListPagedContent(
     modifier: Modifier = Modifier,
     quickEmojis: List<String>,
 ) {
-    val privateImageDecodeCache = remember { mutableStateMapOf<String, PrivateImageDecodeCacheEntry>() }
+    val privateImageDecodeCache = remember { mutableMapOf<String, PrivateImageDecodeCacheEntry>() }
 
     val privateImageRenderState by
         remember(state.messages.itemCount) {
@@ -657,7 +656,10 @@ private fun RenderPagedChatMessageRow(
             derivedStateOf { state.selectedIds.value.contains(message.uuid) }
         }
     val node = nodeMap[message.node.num] ?: message.node
-    val inlineImageBitmap = inlineImageData?.bitmap?.asImageBitmap()
+    val inlineImageBitmap =
+        remember(message.uuid, inlineImageData?.bitmap) {
+            inlineImageData?.bitmap?.asImageBitmap()
+        }
     val inlineImageChunkInfoText =
         inlineImageData?.let {
             stringResource(Res.string.image_timeline_chunk_progress, it.availableChunks, it.totalChunks)
