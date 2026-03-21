@@ -56,7 +56,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -88,8 +87,6 @@ import org.meshtastic.core.resources.save
 import org.meshtastic.core.resources.send
 import org.meshtastic.proto.Config
 import kotlin.math.roundToInt
-
-private val imagePipelineLogger = Logger.withTag("MsgImagePipeline")
 
 internal data class DecodeImageUiState(
     val visible: Boolean = false,
@@ -299,18 +296,11 @@ internal fun ImageAdjustmentDialog(
     fun buildChunksForQuality(bitmap: Bitmap, quality: Int): List<ByteArray> {
         val outputStream = java.io.ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(0, 100), outputStream)
-        return buildChunkedPayloadPackets(jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true).also { builtChunks ->
-            imagePipelineLogger.d {
-                "buildChunksForQuality result: quality=$quality chunks=${builtChunks.size} maxChunkBytes=${builtChunks.maxOfOrNull { it.size } ?: 0}"
-            }
-        }
+        return buildChunkedPayloadPackets(jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true)
     }
 
     LaunchedEffect(imageUri, selectedSize) {
         val requestId = ++scaledBitmapRequestId
-        imagePipelineLogger.d {
-            "imageImport decode start: requestId=$requestId uri=$imageUri selectedSize=$selectedSize"
-        }
         try {
             val computedScaledBitmap =
                 withContext(Dispatchers.IO) {
@@ -326,14 +316,8 @@ internal fun ImageAdjustmentDialog(
                 }
             if (requestId == scaledBitmapRequestId) {
                 scaledBitmap = computedScaledBitmap
-                imagePipelineLogger.d {
-                    "imageImport decode finished: requestId=$requestId hasBitmap=${computedScaledBitmap != null} width=${computedScaledBitmap?.width ?: 0} height=${computedScaledBitmap?.height ?: 0}"
-                }
-            } else {
-                imagePipelineLogger.d { "imageImport decode stale result dropped: requestId=$requestId latest=$scaledBitmapRequestId" }
             }
         } catch (cancellation: CancellationException) {
-            imagePipelineLogger.d { "imageImport decode cancelled: requestId=$requestId" }
             throw cancellation
         }
     }
@@ -348,9 +332,6 @@ internal fun ImageAdjustmentDialog(
     ) {
         val bitmap = scaledBitmap ?: return@LaunchedEffect
         val requestId = ++previewComputationRequestId
-        imagePipelineLogger.d {
-            "previewComputation start: requestId=$requestId width=${bitmap.width} height=${bitmap.height} selectedSize=$selectedSize duty=$boundedDutyCyclePercent maxSeconds=$selectedMaxTransmissionTimeSeconds"
-        }
         try {
             data class PreviewComputationResult(
                 val minSeconds: Float,
@@ -435,9 +416,6 @@ internal fun ImageAdjustmentDialog(
                 }
 
             if (requestId != previewComputationRequestId) {
-                imagePipelineLogger.d {
-                    "previewComputation stale result dropped: requestId=$requestId latest=$previewComputationRequestId"
-                }
                 return@LaunchedEffect
             }
 
@@ -451,11 +429,7 @@ internal fun ImageAdjustmentDialog(
             selectedJpegQuality = result.bestQuality
             chunks = result.bestChunks
             previewBitmap = result.decodedPreview
-            imagePipelineLogger.d {
-                "previewComputation applied: requestId=$requestId quality=${result.bestQuality} chunks=${result.bestChunks.size} decodedPreview=${result.decodedPreview != null} minSeconds=${result.minSeconds} maxSeconds=${result.maxSeconds}"
-            }
         } catch (cancellation: CancellationException) {
-            imagePipelineLogger.d { "previewComputation cancelled: requestId=$requestId" }
             throw cancellation
         }
     }

@@ -16,7 +16,6 @@
  */
 package org.meshtastic.feature.messaging
 
-import co.touchlab.kermit.Logger
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -70,8 +69,6 @@ class MessageViewModel(
     private val meshServiceNotifications: MeshServiceNotifications,
     private val sendMessageUseCase: SendMessageUseCase,
 ) : ViewModel() {
-    private val imageSendLogger = Logger.withTag("MsgImageSend")
-
     private val _title = MutableStateFlow("")
     val title: StateFlow<String> = _title.asStateFlow()
 
@@ -242,11 +239,7 @@ class MessageViewModel(
         delayMillis: Int,
     ) {
         if (chunks.isEmpty()) {
-            imageSendLogger.d { "sendChunkedPayloadChunks skipped: no chunks contactKey=$contactKey" }
             return
-        }
-        imageSendLogger.d {
-            "sendChunkedPayloadChunks start: contactKey=$contactKey chunks=${chunks.size} delayMillis=$delayMillis totalBytes=${chunks.sumOf { it.size }}"
         }
         sendChunksJob?.cancel()
         sendChunksJob =
@@ -254,25 +247,19 @@ class MessageViewModel(
                 _isSendingChunks.value = true
                 try {
                     chunks.forEachIndexed { index, chunk ->
-                        imageSendLogger.d {
-                            "sendChunkedPayloadChunks sending chunk: index=${index + 1}/${chunks.size} bytes=${chunk.size} contactKey=$contactKey"
-                        }
                         sendMessageUseCase.sendPrivateAppPayload(chunk, contactKey)
                         if (index < chunks.lastIndex) {
                             delay(delayMillis.toLong())
                         }
                     }
-                    imageSendLogger.d { "sendChunkedPayloadChunks completed: contactKey=$contactKey chunks=${chunks.size}" }
                 } finally {
                     _isSendingChunks.value = false
                     sendChunksJob = null
-                    imageSendLogger.d { "sendChunkedPayloadChunks finalized: contactKey=$contactKey" }
                 }
             }
     }
 
     fun stopSendingChunks() {
-        imageSendLogger.d { "sendChunkedPayloadChunks stop requested" }
         sendChunksJob?.cancel()
         sendChunksJob = null
         _isSendingChunks.value = false

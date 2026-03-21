@@ -19,7 +19,6 @@ package org.meshtastic.feature.messaging.image
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
-import co.touchlab.kermit.Logger
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPInputStream
@@ -33,8 +32,6 @@ import org.meshtastic.proto.ChunkedPayload
 internal const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
 internal const val IMAGE_CHUNK_PAYLOAD_BYTES = 150
 internal const val MAX_AUTO_IMAGE_JPEG_QUALITY = 90
-
-private val imagePipelineLogger = Logger.withTag("MsgImagePipeline")
 
 internal data class ImageChunkScanResult(
     val partsByIndex: Map<Int, String>,
@@ -85,11 +82,9 @@ internal fun scanImageChunks(
 
 internal fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: Int): Bitmap? {
     if (totalParts <= 0 || partsByIndex.isEmpty()) {
-        imagePipelineLogger.d { "decodeBitmapFromChunks skipped: totalParts=$totalParts availableParts=${partsByIndex.size}" }
         return null
     }
     if ((1..totalParts).any { partIndex -> !partsByIndex.containsKey(partIndex) }) {
-        imagePipelineLogger.d { "decodeBitmapFromChunks waiting: totalParts=$totalParts availableParts=${partsByIndex.size}" }
         return null
     }
     val payload =
@@ -98,21 +93,15 @@ internal fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: 
             .joinToString(separator = "")
             .replace(Regex("\\s+"), "")
     if (payload.isEmpty()) {
-        imagePipelineLogger.d { "decodeBitmapFromChunks failed: empty base64 payload" }
         return null
     }
     val payloadBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
     val imageBytes = maybeGunzip(payloadBytes)
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).also { bitmap ->
-        imagePipelineLogger.d {
-            "decodeBitmapFromChunks result: decoded=${bitmap != null} payloadBytes=${payloadBytes.size} imageBytes=${imageBytes.size}"
-        }
-    }
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
 }
 
 private fun maybeGzip(inputBytes: ByteArray, isEnabled: Boolean): ByteArray {
     if (!isEnabled) {
-        imagePipelineLogger.d { "maybeGzip disabled: inputBytes=${inputBytes.size}" }
         return inputBytes
     }
     return runCatching {
@@ -121,18 +110,13 @@ private fun maybeGzip(inputBytes: ByteArray, isEnabled: Boolean): ByteArray {
             gzip.write(inputBytes)
         }
         outputStream.toByteArray()
-    }.getOrDefault(inputBytes).also { outputBytes ->
-        imagePipelineLogger.d {
-            "maybeGzip result: inputBytes=${inputBytes.size} outputBytes=${outputBytes.size} usedGzip=${outputBytes.size != inputBytes.size || isEnabled}"
-        }
-    }
+    }.getOrDefault(inputBytes)
 }
 
 private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
     if (inputBytes.size < 2) return inputBytes
     val isGzip = inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
     if (!isGzip) {
-        imagePipelineLogger.d { "maybeGunzip passthrough: inputBytes=${inputBytes.size}" }
         return inputBytes
     }
     return runCatching {
@@ -141,11 +125,7 @@ private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
                 gzipInput.readBytes()
             }
         }
-    }.getOrDefault(inputBytes).also { outputBytes ->
-        imagePipelineLogger.d {
-            "maybeGunzip result: inputBytes=${inputBytes.size} outputBytes=${outputBytes.size}"
-        }
-    }
+    }.getOrDefault(inputBytes)
 }
 
 internal fun buildChunkedPayloadPackets(
@@ -155,7 +135,6 @@ internal fun buildChunkedPayloadPackets(
 ): List<ByteArray> {
     val payloadBytes = maybeGzip(jpegBytes, zipCompressionEnabled)
     if (payloadBytes.isEmpty()) {
-        imagePipelineLogger.w { "buildChunkedPayloadPackets produced empty payload: jpegBytes=${jpegBytes.size}" }
         return emptyList()
     }
     val totalParts = ((payloadBytes.size + chunkPayloadBytes - 1) / chunkPayloadBytes).coerceAtLeast(1)
@@ -176,15 +155,11 @@ internal fun buildChunkedPayloadPackets(
         offset = nextOffset
         partIndex++
     }
-    imagePipelineLogger.d {
-        "buildChunkedPayloadPackets result: payloadId=$payloadId jpegBytes=${jpegBytes.size} payloadBytes=${payloadBytes.size} chunkPayloadBytes=$chunkPayloadBytes chunks=${chunks.size}"
-    }
     return chunks
 }
 
 internal fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bitmap? {
     if (chunks.isEmpty()) {
-        imagePipelineLogger.d { "decodeBitmapFromOutgoingChunkedPayloads skipped: no chunks" }
         return null
     }
     val decodedChunks =
@@ -192,9 +167,6 @@ internal fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): B
             runCatching { ChunkedPayload.ADAPTER.decode(chunkBytes.toByteString()) }.getOrNull()
         }
     if (decodedChunks.size != chunks.size) {
-        imagePipelineLogger.w {
-            "decodeBitmapFromOutgoingChunkedPayloads failed: decodedChunks=${decodedChunks.size} expected=${chunks.size}"
-        }
         return null
     }
 
@@ -205,9 +177,6 @@ internal fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): B
 
     decodedChunks.forEach { chunk ->
         if (chunk.payload_id != payloadId || chunk.chunk_count != totalParts) {
-            imagePipelineLogger.w {
-                "decodeBitmapFromOutgoingChunkedPayloads inconsistent chunk metadata: payloadId=${chunk.payload_id} expectedPayloadId=$payloadId chunkCount=${chunk.chunk_count} expectedChunkCount=$totalParts"
-            }
             return null
         }
         partsByIndex[chunk.chunk_index] = chunk.payload_chunk.toByteArray()
@@ -221,13 +190,8 @@ internal fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): B
             }
             .toByteArray()
     if (payload.isEmpty()) {
-        imagePipelineLogger.w { "decodeBitmapFromOutgoingChunkedPayloads failed: reassembled payload empty" }
         return null
     }
     val imageBytes = maybeGunzip(payload)
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).also { bitmap ->
-        imagePipelineLogger.d {
-            "decodeBitmapFromOutgoingChunkedPayloads result: decoded=${bitmap != null} chunks=${chunks.size} payloadBytes=${payload.size} imageBytes=${imageBytes.size}"
-        }
-    }
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
 }
