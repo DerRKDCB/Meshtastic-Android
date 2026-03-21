@@ -59,12 +59,7 @@ data class PacketEntity(
             receivedTime = received_time,
             node = node,
             fromLocal = isFromLocal,
-            text =
-                if (data.dataType == PortNum.PRIVATE_APP.value && data.text.isNullOrEmpty()) {
-                    "[Image]"
-                } else {
-                    data.text.orEmpty()
-                },
+            text = data.text.orEmpty(),
             time = getShortDateTime(data.time),
             snr = snr,
             rssi = rssi,

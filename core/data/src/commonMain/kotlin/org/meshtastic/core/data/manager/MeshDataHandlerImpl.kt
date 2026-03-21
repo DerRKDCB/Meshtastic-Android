@@ -65,7 +65,6 @@ import org.meshtastic.core.resources.getString
 import org.meshtastic.core.resources.unknown_username
 import org.meshtastic.core.resources.waypoint_received
 import org.meshtastic.proto.AdminMessage
-import org.meshtastic.proto.ChunkedPayload
 import org.meshtastic.proto.MeshPacket
 import org.meshtastic.proto.Paxcount
 import org.meshtastic.proto.PortNum
@@ -208,13 +207,6 @@ class MeshDataHandlerImpl(
             PortNum.ATAK_FORWARDER,
             PortNum.PRIVATE_APP,
             -> {
-                val payloadBytes = dataPacket.bytes?.toByteArray()
-                val chunk =
-                    payloadBytes?.let { bytes -> runCatching { ChunkedPayload.ADAPTER.decode(bytes.toByteString()) }.getOrNull() }
-                Logger.d {
-                    "PRIVATE_APP received: from=${packet.from} to=${packet.to} packetId=${packet.id} payloadBytes=${payloadBytes?.size ?: 0} " +
-                        "chunkPayloadId=${chunk?.payload_id} chunkIndex=${chunk?.chunk_index} chunkCount=${chunk?.chunk_count}"
-                }
                 rememberDataPacket(dataPacket, myNodeNum)
                 shouldBroadcast = true
             }
