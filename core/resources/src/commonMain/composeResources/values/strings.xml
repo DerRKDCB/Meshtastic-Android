@@ -194,7 +194,6 @@
     <string name="send">Send</string>
     <string name="attachment">Attachment</string>
     <string name="attach_image">Image</string>
-    <string name="attach_file">File</string>
     <string name="image_adjustment_preview">Image preview</string>
     <string name="image_adjustment_select_max_side_length">Select maximum resolution:</string>
     <string name="image_adjustment_jpeg_quality">JPEG quality</string>

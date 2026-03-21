@@ -18,87 +18,15 @@ package org.meshtastic.feature.messaging.image
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.util.Base64
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import okio.ByteString.Companion.toByteString
-import org.meshtastic.core.model.Message
-import org.meshtastic.feature.messaging.ImageChunk
-import org.meshtastic.feature.messaging.parseImageChunk
 import org.meshtastic.proto.ChunkedPayload
 
-internal const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
 internal const val IMAGE_CHUNK_PAYLOAD_BYTES = 150
 internal const val MAX_AUTO_IMAGE_JPEG_QUALITY = 90
-
-internal data class ImageChunkScanResult(
-    val partsByIndex: Map<Int, String>,
-    val totalParts: Int,
-)
-
-internal fun scanImageChunks(
-    seedChunk: ImageChunk,
-    messages: List<Message>,
-    onProgress: (foundChunks: Int, totalChunks: Int) -> Unit,
-): ImageChunkScanResult {
-    var totalParts = seedChunk.totalParts
-    val partsByIndex = mutableMapOf(seedChunk.partIndex to seedChunk.payload)
-    var earliestFoundChunkTime: Long? = null
-    var searchLowerBoundInclusive = Long.MIN_VALUE
-
-    onProgress(partsByIndex.size, totalParts)
-
-    for (historyMessage in messages) {
-        if (earliestFoundChunkTime != null && historyMessage.receivedTime < searchLowerBoundInclusive) {
-            break
-        }
-
-        val parsedChunk = parseImageChunk(historyMessage.text) ?: continue
-        if (parsedChunk.imageId != seedChunk.imageId) continue
-
-        if (parsedChunk.totalParts > totalParts) {
-            totalParts = parsedChunk.totalParts
-        }
-
-        if (earliestFoundChunkTime == null || historyMessage.receivedTime < earliestFoundChunkTime) {
-            earliestFoundChunkTime = historyMessage.receivedTime
-            searchLowerBoundInclusive = historyMessage.receivedTime - IMAGE_HISTORY_SCAN_WINDOW_MILLIS
-        }
-
-        val wasAdded = partsByIndex.putIfAbsent(parsedChunk.partIndex, parsedChunk.payload) == null
-        if (wasAdded) {
-            onProgress(partsByIndex.size, totalParts)
-        }
-
-        if (partsByIndex.size >= totalParts) {
-            break
-        }
-    }
-
-    return ImageChunkScanResult(partsByIndex = partsByIndex, totalParts = totalParts)
-}
-
-internal fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: Int): Bitmap? {
-    if (totalParts <= 0 || partsByIndex.isEmpty()) {
-        return null
-    }
-    if ((1..totalParts).any { partIndex -> !partsByIndex.containsKey(partIndex) }) {
-        return null
-    }
-    val payload =
-        (1..totalParts)
-            .mapNotNull { partIndex -> partsByIndex[partIndex] }
-            .joinToString(separator = "")
-            .replace(Regex("\\s+"), "")
-    if (payload.isEmpty()) {
-        return null
-    }
-    val payloadBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
-    val imageBytes = maybeGunzip(payloadBytes)
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-}
 
 private fun maybeGzip(inputBytes: ByteArray, isEnabled: Boolean): ByteArray {
     if (!isEnabled) {
