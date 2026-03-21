@@ -55,7 +55,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -106,11 +105,7 @@ import org.meshtastic.feature.messaging.component.ReplySnippet
 import org.meshtastic.feature.messaging.component.ScrollToBottomFab
 import org.meshtastic.feature.messaging.image.DEFAULT_IMAGE_DUTY_CYCLE_PERCENT
 import org.meshtastic.feature.messaging.image.MIN_IMAGE_DUTY_CYCLE_PERCENT
-import org.meshtastic.feature.messaging.image.DecodeImageDialog
-import org.meshtastic.feature.messaging.image.DecodeImageError
-import org.meshtastic.feature.messaging.image.DecodeImageUiState
 import org.meshtastic.feature.messaging.image.ImageAdjustmentDialog
-import org.meshtastic.feature.messaging.image.decodeImageFromTimelineMessage
 import org.meshtastic.feature.messaging.image.maxDutyCyclePercentForRegion
 import java.nio.charset.StandardCharsets
 
@@ -158,7 +153,6 @@ fun MessageScreen(
     var sharedContact by rememberSaveable { mutableStateOf<Node?>(null) }
     val selectedMessageIds = rememberSaveable { mutableStateOf(emptySet<Long>()) }
     val messageInputState = rememberTextFieldState(message)
-    var decodeImageUiState by remember { mutableStateOf(DecodeImageUiState()) }
     val showQuickChat by viewModel.showQuickChat.collectAsStateWithLifecycle()
     val filteredCount by viewModel.filteredCount.collectAsStateWithLifecycle()
     val showFiltered by viewModel.showFiltered.collectAsStateWithLifecycle()
@@ -280,16 +274,6 @@ fun MessageScreen(
                         }
                         selectedMessageIds.value = emptySet()
                     }
-                    is MessageScreenEvent.DecodeImage -> {
-                        coroutineScope.launch {
-                            decodeImageFromTimelineMessage(
-                                messageText = event.message.text,
-                                loadMessages = { viewModel.getMessagesFlow(contactKey, limit = null).first() },
-                                initialState = decodeImageUiState,
-                                setState = { decodeImageUiState = it },
-                            )
-                        }
-                    }
                 }
             }
 
@@ -305,13 +289,6 @@ fun MessageScreen(
     }
 
     sharedContact?.let { contact -> SharedContactDialog(contact = contact, onDismiss = { sharedContact = null }) }
-
-    if (decodeImageUiState.visible) {
-        DecodeImageDialog(
-            state = decodeImageUiState,
-            onDismiss = { decodeImageUiState = DecodeImageUiState() },
-        )
-    }
 
     val originalMessage by
         remember(replyingToPacketId, pagedMessages.itemCount) {
@@ -442,7 +419,6 @@ fun MessageScreen(
                     onDeleteMessages = { viewModel.deleteMessages(it) },
                     onSendMessage = { text, key -> viewModel.sendMessage(text, key) },
                     onReply = { message -> replyingToPacketId = message?.packetId },
-                    onDecodeImage = { onEvent(MessageScreenEvent.DecodeImage(it)) },
                 ),
                 quickEmojis = viewModel.frequentEmojis,
             )

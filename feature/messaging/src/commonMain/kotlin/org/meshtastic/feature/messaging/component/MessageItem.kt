@@ -80,7 +80,6 @@ import org.meshtastic.core.ui.icon.Hops
 import org.meshtastic.core.ui.icon.MeshtasticIcons
 import org.meshtastic.core.ui.theme.MessageItemColors
 import org.meshtastic.core.ui.util.createClipEntry
-import org.meshtastic.feature.messaging.isImageChunkMessage
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Suppress("LongMethod", "CyclomaticComplexMethod")
@@ -108,7 +107,6 @@ fun MessageItem(
     onClickChip: (Node) -> Unit = {},
     onNavigateToOriginalMessage: (Int) -> Unit = {},
     onStatusClick: () -> Unit = {},
-    onDecodeImage: () -> Unit = {},
     onInlineImageClick: () -> Unit = {},
     hasSamePrev: Boolean = false,
     hasSameNext: Boolean = false,
@@ -167,8 +165,6 @@ fun MessageItem(
                             null
                         },
                         onStatus = onStatusClick,
-                        isImageChunk = message.isImageChunkMessage(),
-                        onDecodeImage = { onDecodeImage(); activeSheet = null },
                     )
                 }
 

@@ -16,7 +16,6 @@
  */
 package org.meshtastic.feature.messaging
 
-import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.Node
 
 /** Defines the various user interactions that can occur on the MessageScreen. */
@@ -48,6 +47,4 @@ internal sealed interface MessageScreenEvent {
     /** Copy the given text to the clipboard. */
     data class CopyToClipboard(val text: String) : MessageScreenEvent
 
-    /** Decode an image from message chunks. */
-    data class DecodeImage(val message: Message) : MessageScreenEvent
 }
