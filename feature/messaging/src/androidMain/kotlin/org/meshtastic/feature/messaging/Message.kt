@@ -61,11 +61,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import android.util.Base64
-import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
-import java.util.zip.GZIPInputStream
-import java.util.zip.GZIPOutputStream
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
@@ -108,15 +104,12 @@ import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.common.util.HomoglyphCharacterStringTransformer
 import org.meshtastic.core.model.Channel
-import org.meshtastic.core.model.ChannelOption
 import org.meshtastic.core.database.entity.QuickChatAction
 import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.Node
-import org.meshtastic.core.model.RegionInfo
 import org.meshtastic.core.model.util.getChannel
 import org.meshtastic.proto.Config
-import org.meshtastic.proto.ChunkedPayload
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.close
 import org.meshtastic.core.resources.decode_image
@@ -158,27 +151,28 @@ import org.meshtastic.feature.messaging.component.MessageTopBar
 import org.meshtastic.feature.messaging.component.QuickChatRow
 import org.meshtastic.feature.messaging.component.ReplySnippet
 import org.meshtastic.feature.messaging.component.ScrollToBottomFab
+import org.meshtastic.feature.messaging.image.DEFAULT_IMAGE_DUTY_CYCLE_PERCENT
+import org.meshtastic.feature.messaging.image.MAX_AUTO_IMAGE_JPEG_QUALITY
+import org.meshtastic.feature.messaging.image.MIN_IMAGE_DUTY_CYCLE_PERCENT
+import org.meshtastic.feature.messaging.image.TRANSMISSION_TIME_SLIDER_STEPS
+import org.meshtastic.feature.messaging.image.buildChunkedPayloadPackets
+import org.meshtastic.feature.messaging.image.decodeBitmapFromChunks
+import org.meshtastic.feature.messaging.image.decodeBitmapFromOutgoingChunkedPayloads
+import org.meshtastic.feature.messaging.image.estimatePacketAirtimeMillis
+import org.meshtastic.feature.messaging.image.estimateTransmissionMillisForChunks
+import org.meshtastic.feature.messaging.image.formatDutyCyclePercent
+import org.meshtastic.feature.messaging.image.interChunkDelayMillisForDutyCycle
+import org.meshtastic.feature.messaging.image.maxDutyCyclePercentForRegion
+import org.meshtastic.feature.messaging.image.normalizeTransmissionSliderPosition
+import org.meshtastic.feature.messaging.image.scanImageChunks
+import org.meshtastic.feature.messaging.image.snapTransmissionSliderPosition
+import org.meshtastic.feature.messaging.image.transmissionSecondsFromSliderPosition
 import java.nio.charset.StandardCharsets
-import okio.ByteString.Companion.toByteString
-import kotlin.math.ceil
-import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sqrt
 
 private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
-private const val IMAGE_HISTORY_SCAN_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
-private const val IMAGE_CHUNK_PAYLOAD_BYTES = 150
-private const val MIN_IMAGE_DUTY_CYCLE_PERCENT = 0.1f
-private const val DEFAULT_IMAGE_DUTY_CYCLE_PERCENT = 1.0f
-private const val MAX_AUTO_IMAGE_JPEG_QUALITY = 90
-private const val TRANSMISSION_TIME_SLIDER_STEPS = 10
 private val imagePipelineLogger = Logger.withTag("MsgImagePipeline")
-
-private data class ModemAirtimeParams(
-    val spreadFactor: Int,
-    val codingRateDenominator: Int,
-)
 
 private data class DecodeImageUiState(
     val visible: Boolean = false,
@@ -196,148 +190,6 @@ private sealed interface DecodeImageError {
     data class MissingChunks(val found: Int, val total: Int) : DecodeImageError
 
     data object DecodeFailed : DecodeImageError
-}
-
-private data class ImageChunkScanResult(
-    val partsByIndex: Map<Int, String>,
-    val totalParts: Int,
-)
-
-private fun maxDutyCyclePercentForRegion(regionCode: Config.LoRaConfig.RegionCode): Float =
-    when (regionCode) {
-        Config.LoRaConfig.RegionCode.EU_433,
-        Config.LoRaConfig.RegionCode.EU_868,
-        Config.LoRaConfig.RegionCode.UA_433,
-        -> 10.0f
-        Config.LoRaConfig.RegionCode.UA_868 -> 1.0f
-        else -> 100.0f
-    }
-
-private fun modemParamsForPreset(modemPreset: Config.LoRaConfig.ModemPreset): ModemAirtimeParams =
-    when (modemPreset) {
-        Config.LoRaConfig.ModemPreset.VERY_LONG_SLOW -> ModemAirtimeParams(spreadFactor = 12, codingRateDenominator = 8)
-        Config.LoRaConfig.ModemPreset.LONG_SLOW -> ModemAirtimeParams(spreadFactor = 12, codingRateDenominator = 8)
-        Config.LoRaConfig.ModemPreset.LONG_FAST -> ModemAirtimeParams(spreadFactor = 11, codingRateDenominator = 5)
-        Config.LoRaConfig.ModemPreset.LONG_MODERATE -> ModemAirtimeParams(spreadFactor = 10, codingRateDenominator = 5)
-        Config.LoRaConfig.ModemPreset.LONG_TURBO -> ModemAirtimeParams(spreadFactor = 11, codingRateDenominator = 5)
-        Config.LoRaConfig.ModemPreset.MEDIUM_SLOW -> ModemAirtimeParams(spreadFactor = 10, codingRateDenominator = 7)
-        Config.LoRaConfig.ModemPreset.MEDIUM_FAST -> ModemAirtimeParams(spreadFactor = 9, codingRateDenominator = 5)
-        Config.LoRaConfig.ModemPreset.SHORT_SLOW -> ModemAirtimeParams(spreadFactor = 8, codingRateDenominator = 5)
-        Config.LoRaConfig.ModemPreset.SHORT_FAST -> ModemAirtimeParams(spreadFactor = 7, codingRateDenominator = 5)
-        Config.LoRaConfig.ModemPreset.SHORT_TURBO -> ModemAirtimeParams(spreadFactor = 7, codingRateDenominator = 5)
-    }
-
-private fun bandwidthKhz(loraConfig: Config.LoRaConfig): Double {
-    if (!loraConfig.use_preset) {
-        return when (loraConfig.bandwidth) {
-            31 -> 31.25
-            62 -> 62.5
-            200 -> 203.125
-            400 -> 406.25
-            800 -> 812.5
-            1600 -> 1625.0
-            else -> loraConfig.bandwidth.toDouble()
-        }
-    }
-
-    val baseBandwidthMHz = ChannelOption.from(loraConfig.modem_preset)?.bandwidth ?: ChannelOption.DEFAULT.bandwidth
-    val regionScale = if (RegionInfo.fromRegionCode(loraConfig.region)?.wideLora == true) 3.25 else 1.0
-    return baseBandwidthMHz.toDouble() * regionScale * 1000.0
-}
-
-private fun estimatePacketAirtimeMillis(payloadBytes: Int, loraConfig: Config.LoRaConfig): Int {
-    if (payloadBytes <= 0) {
-        return 0
-    }
-
-    val modemParams =
-        if (loraConfig.use_preset) {
-            modemParamsForPreset(loraConfig.modem_preset)
-        } else {
-            ModemAirtimeParams(
-                spreadFactor = loraConfig.spread_factor.coerceIn(7, 12),
-                codingRateDenominator = loraConfig.coding_rate.coerceIn(5, 8),
-            )
-        }
-
-    val sf = modemParams.spreadFactor
-    val codingRateTerm = (modemParams.codingRateDenominator - 4).coerceIn(1, 4)
-    val bwKhz = bandwidthKhz(loraConfig)
-    if (bwKhz <= 0.0) {
-        return 0
-    }
-
-    val lowDataRateOptimization = if (sf >= 11 && bwKhz <= 125.0) 1 else 0
-    val symbolDurationSeconds = (2.0.pow(sf.toDouble())) / (bwKhz * 1000.0)
-    val preambleSymbols = 8.0 + 4.25
-
-    val numerator = (8.0 * payloadBytes) - (4.0 * sf) + 28.0 + 16.0
-    val denominator = 4.0 * (sf - (2 * lowDataRateOptimization))
-    val payloadSymbolSteps = ceil((numerator / denominator).coerceAtLeast(0.0))
-    val payloadSymbols = 8.0 + (payloadSymbolSteps * (codingRateTerm + 4))
-
-    val airtimeSeconds = (preambleSymbols + payloadSymbols) * symbolDurationSeconds
-    return (airtimeSeconds * 1000.0).roundToInt().coerceAtLeast(1)
-}
-
-private fun interChunkDelayMillisForDutyCycle(
-    dutyCyclePercent: Float,
-    packetAirtimeMillis: Int,
-): Int {
-    if (packetAirtimeMillis <= 0) {
-        return 0
-    }
-    val dutyFraction = (dutyCyclePercent / 100f).coerceIn(0.001f, 1f)
-    val cycleMillis = packetAirtimeMillis / dutyFraction
-    return (cycleMillis - packetAirtimeMillis).roundToInt().coerceAtLeast(0)
-}
-
-private fun estimateTransmissionMillisForChunks(
-    chunks: List<ByteArray>,
-    dutyCyclePercent: Float,
-    loraConfig: Config.LoRaConfig,
-): Int {
-    if (chunks.isEmpty()) {
-        return 0
-    }
-    val packetPayloadBytes = chunks.maxOfOrNull { it.size } ?: 0
-    val packetAirtimeMillis = estimatePacketAirtimeMillis(packetPayloadBytes, loraConfig)
-    val delayMillis = interChunkDelayMillisForDutyCycle(dutyCyclePercent, packetAirtimeMillis)
-    return (chunks.size * packetAirtimeMillis) + ((chunks.size - 1).coerceAtLeast(0) * delayMillis)
-}
-
-private fun formatDutyCyclePercent(value: Float): String {
-    val roundedTenths = (value * 10f).roundToInt() / 10f
-    return if (roundedTenths % 1f == 0f) {
-        "${roundedTenths.toInt()}%"
-    } else {
-        "$roundedTenths%"
-    }
-}
-
-private fun normalizeTransmissionSliderPosition(seconds: Float, min: Float, max: Float): Float {
-    if (max <= min) {
-        return 0f
-    }
-    val normalizedSeconds = ((seconds - min) / (max - min)).coerceIn(0f, 1f)
-    return sqrt(normalizedSeconds)
-}
-
-private fun transmissionSecondsFromSliderPosition(position: Float, min: Float, max: Float): Float {
-    if (max <= min) {
-        return min
-    }
-    val clampedPosition = position.coerceIn(0f, 1f)
-    return min + (clampedPosition * clampedPosition * (max - min))
-}
-
-private fun snapTransmissionSliderPosition(position: Float): Float {
-    val stepCount = TRANSMISSION_TIME_SLIDER_STEPS - 1
-    if (stepCount <= 0) {
-        return position.coerceIn(0f, 1f)
-    }
-    val snappedStep = (position.coerceIn(0f, 1f) * stepCount).roundToInt().coerceIn(0, stepCount)
-    return snappedStep / stepCount.toFloat()
 }
 
 /**
@@ -766,112 +618,6 @@ fun MessageScreen(
     }
 }
 
-private fun scanImageChunks(
-    seedChunk: ImageChunk,
-    messages: List<Message>,
-    onProgress: (foundChunks: Int, totalChunks: Int) -> Unit,
-): ImageChunkScanResult {
-    var totalParts = seedChunk.totalParts
-    val partsByIndex = mutableMapOf(seedChunk.partIndex to seedChunk.payload)
-    var earliestFoundChunkTime: Long? = null
-    var searchLowerBoundInclusive = Long.MIN_VALUE
-
-    onProgress(partsByIndex.size, totalParts)
-
-    for (historyMessage in messages) {
-        if (earliestFoundChunkTime != null && historyMessage.receivedTime < searchLowerBoundInclusive) {
-            break
-        }
-
-        val parsedChunk = parseImageChunk(historyMessage.text) ?: continue
-        if (parsedChunk.imageId != seedChunk.imageId) continue
-
-        if (parsedChunk.totalParts > totalParts) {
-            totalParts = parsedChunk.totalParts
-        }
-
-        if (earliestFoundChunkTime == null || historyMessage.receivedTime < earliestFoundChunkTime) {
-            earliestFoundChunkTime = historyMessage.receivedTime
-            searchLowerBoundInclusive = historyMessage.receivedTime - IMAGE_HISTORY_SCAN_WINDOW_MILLIS
-        }
-
-        val wasAdded = partsByIndex.putIfAbsent(parsedChunk.partIndex, parsedChunk.payload) == null
-        if (wasAdded) {
-            onProgress(partsByIndex.size, totalParts)
-        }
-
-        if (partsByIndex.size >= totalParts) {
-            break
-        }
-    }
-
-    return ImageChunkScanResult(partsByIndex = partsByIndex, totalParts = totalParts)
-}
-
-private fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: Int): Bitmap? {
-    if (totalParts <= 0 || partsByIndex.isEmpty()) {
-        imagePipelineLogger.d { "decodeBitmapFromChunks skipped: totalParts=$totalParts availableParts=${partsByIndex.size}" }
-        return null
-    }
-    if ((1..totalParts).any { partIndex -> !partsByIndex.containsKey(partIndex) }) {
-        imagePipelineLogger.d { "decodeBitmapFromChunks waiting: totalParts=$totalParts availableParts=${partsByIndex.size}" }
-        return null
-    }
-    val payload =
-        (1..totalParts)
-            .mapNotNull { partIndex -> partsByIndex[partIndex] }
-            .joinToString(separator = "")
-            .replace(Regex("\\s+"), "")
-    if (payload.isEmpty()) {
-        imagePipelineLogger.d { "decodeBitmapFromChunks failed: empty base64 payload" }
-        return null
-    }
-    val payloadBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
-    val imageBytes = maybeGunzip(payloadBytes)
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).also { bitmap ->
-        imagePipelineLogger.d {
-            "decodeBitmapFromChunks result: decoded=${bitmap != null} payloadBytes=${payloadBytes.size} imageBytes=${imageBytes.size}"
-        }
-    }
-}
-
-private fun maybeGzip(inputBytes: ByteArray, isEnabled: Boolean): ByteArray {
-    if (!isEnabled) {
-        imagePipelineLogger.d { "maybeGzip disabled: inputBytes=${inputBytes.size}" }
-        return inputBytes
-    }
-    return runCatching {
-        val outputStream = ByteArrayOutputStream()
-        GZIPOutputStream(outputStream).use { gzip ->
-            gzip.write(inputBytes)
-        }
-        outputStream.toByteArray()
-    }.getOrDefault(inputBytes).also { outputBytes ->
-        imagePipelineLogger.d {
-            "maybeGzip result: inputBytes=${inputBytes.size} outputBytes=${outputBytes.size} usedGzip=${outputBytes.size != inputBytes.size || isEnabled}"
-        }
-    }
-}
-
-private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
-    if (inputBytes.size < 2) return inputBytes
-    val isGzip = inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
-    if (!isGzip) {
-        imagePipelineLogger.d { "maybeGunzip passthrough: inputBytes=${inputBytes.size}" }
-        return inputBytes
-    }
-    return runCatching {
-        ByteArrayInputStream(inputBytes).use { byteInput ->
-            GZIPInputStream(byteInput).use { gzipInput ->
-                gzipInput.readBytes()
-            }
-        }
-    }.getOrDefault(inputBytes).also { outputBytes ->
-        imagePipelineLogger.d {
-            "maybeGunzip result: inputBytes=${inputBytes.size} outputBytes=${outputBytes.size}"
-        }
-    }
-}
 
 private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap, imageId: String?): Boolean {
     val now = System.currentTimeMillis()
@@ -918,90 +664,6 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
                 "saveBitmapToGallery result: success=$success imageId=$imageId uri=$uri width=${bitmap.width} height=${bitmap.height}"
             }
         }
-}
-
-private fun buildChunkedPayloadPackets(
-    jpegBytes: ByteArray,
-    zipCompressionEnabled: Boolean = true,
-    chunkPayloadBytes: Int = IMAGE_CHUNK_PAYLOAD_BYTES,
-): List<ByteArray> {
-    val payloadBytes = maybeGzip(jpegBytes, zipCompressionEnabled)
-    if (payloadBytes.isEmpty()) {
-        imagePipelineLogger.w { "buildChunkedPayloadPackets produced empty payload: jpegBytes=${jpegBytes.size}" }
-        return emptyList()
-    }
-    val totalParts = ((payloadBytes.size + chunkPayloadBytes - 1) / chunkPayloadBytes).coerceAtLeast(1)
-    val payloadId = kotlin.random.Random.nextInt(1, Int.MAX_VALUE)
-    val chunks = mutableListOf<ByteArray>()
-    var offset = 0
-    var partIndex = 1
-    while (offset < payloadBytes.size) {
-        val nextOffset = (offset + chunkPayloadBytes).coerceAtMost(payloadBytes.size)
-        val packet =
-            ChunkedPayload(
-                payload_id = payloadId,
-                chunk_count = totalParts,
-                chunk_index = partIndex,
-                payload_chunk = payloadBytes.copyOfRange(offset, nextOffset).toByteString(),
-            )
-        chunks += ChunkedPayload.ADAPTER.encode(packet)
-        offset = nextOffset
-        partIndex++
-    }
-    imagePipelineLogger.d {
-        "buildChunkedPayloadPackets result: payloadId=$payloadId jpegBytes=${jpegBytes.size} payloadBytes=${payloadBytes.size} chunkPayloadBytes=$chunkPayloadBytes chunks=${chunks.size}"
-    }
-    return chunks
-}
-
-private fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bitmap? {
-    if (chunks.isEmpty()) {
-        imagePipelineLogger.d { "decodeBitmapFromOutgoingChunkedPayloads skipped: no chunks" }
-        return null
-    }
-    val decodedChunks =
-        chunks.mapNotNull { chunkBytes ->
-            runCatching { ChunkedPayload.ADAPTER.decode(chunkBytes.toByteString()) }.getOrNull()
-        }
-    if (decodedChunks.size != chunks.size) {
-        imagePipelineLogger.w {
-            "decodeBitmapFromOutgoingChunkedPayloads failed: decodedChunks=${decodedChunks.size} expected=${chunks.size}"
-        }
-        return null
-    }
-
-    val firstChunk = decodedChunks.firstOrNull() ?: return null
-    val payloadId = firstChunk.payload_id
-    val totalParts = firstChunk.chunk_count
-    val partsByIndex = mutableMapOf<Int, ByteArray>()
-
-    decodedChunks.forEach { chunk ->
-        if (chunk.payload_id != payloadId || chunk.chunk_count != totalParts) {
-            imagePipelineLogger.w {
-                "decodeBitmapFromOutgoingChunkedPayloads inconsistent chunk metadata: payloadId=${chunk.payload_id} expectedPayloadId=$payloadId chunkCount=${chunk.chunk_count} expectedChunkCount=$totalParts"
-            }
-            return null
-        }
-        partsByIndex[chunk.chunk_index] = chunk.payload_chunk.toByteArray()
-    }
-
-    val payload =
-        (1..totalParts)
-            .mapNotNull { partIndex -> partsByIndex[partIndex] }
-            .fold(ByteArrayOutputStream()) { stream, part ->
-                stream.apply { write(part) }
-            }
-            .toByteArray()
-    if (payload.isEmpty()) {
-        imagePipelineLogger.w { "decodeBitmapFromOutgoingChunkedPayloads failed: reassembled payload empty" }
-        return null
-    }
-    val imageBytes = maybeGunzip(payload)
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).also { bitmap ->
-        imagePipelineLogger.d {
-            "decodeBitmapFromOutgoingChunkedPayloads result: decoded=${bitmap != null} chunks=${chunks.size} payloadBytes=${payload.size} imageBytes=${imageBytes.size}"
-        }
-    }
 }
 
 @Composable
