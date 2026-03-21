@@ -48,7 +48,10 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.itemContentType
+import androidx.paging.compose.itemKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
@@ -87,7 +90,6 @@ internal data class MessageListPagedState(
     val nodes: List<Node>,
     val ourNode: Node?,
     val messages: LazyPagingItems<Message>,
-    val timelineMessages: List<Message>,
     val imageChunkMessages: List<Message>,
     val selectedIds: MutableState<Set<Long>>,
     val contactKey: String,
@@ -172,13 +174,18 @@ internal fun MessageListPaged(
     // Disable auto-scroll when any dialog is open to prevent list jumping
     val hasDialogOpen = showStatusDialog != null || showReactionDialog != null
 
+    val currentLoadedMessages by
+        remember(state.messages.itemCount) {
+            derivedStateOf { state.messages.itemSnapshotList.items.filterNotNull() }
+        }
+
     // Track unread count based on scroll position
-    UpdateUnreadCountPaged(listState = listState, messages = state.timelineMessages, onUnreadChange = handlers.onUnreadChanged)
+    UpdateUnreadCountPaged(listState = listState, messages = currentLoadedMessages, onUnreadChange = handlers.onUnreadChanged)
 
     // Auto-scroll to bottom when new messages arrive
     AutoScrollToBottomPaged(
         listState = listState,
-        messages = state.timelineMessages,
+        messages = currentLoadedMessages,
         hasUnreadMessages = state.hasUnreadMessages,
         hasDialogOpen = hasDialogOpen,
     )
@@ -216,7 +223,11 @@ private fun MessageListPagedContent(
     val privateImageDecodeCache = remember { mutableMapOf<String, PrivateImageDecodeCacheEntry>() }
     var expandedImageSelection by remember { mutableStateOf<ExpandedTimelineImageSelection?>(null) }
 
-    val displayedMessages = state.timelineMessages
+    val currentLoadedMessages by
+        remember(state.messages.itemCount) {
+            derivedStateOf { state.messages.itemSnapshotList.items.filterNotNull() }
+        }
+    val displayedMessages = currentLoadedMessages
 
     val privateImageRenderState by
         remember(state.imageChunkMessages) {
@@ -225,7 +236,7 @@ private fun MessageListPagedContent(
             }
         }
 
-    val representativeRowUuidByPayload = remember { mutableMapOf<TimelineImagePayloadKey, Long>() }
+    val representativeRowUuidByPayload = remember(state.contactKey) { mutableMapOf<TimelineImagePayloadKey, Long>() }
 
     val loadedImageRows by
         remember(displayedMessages, privateImageRenderState) {
@@ -285,10 +296,10 @@ private fun MessageListPagedContent(
     // Calculate unread divider position using snapshot to avoid side-effects and improve performance
     // Optimized: Use full snapshot index to correctly match LazyColumn index range
     val unreadDividerIndex by
-        remember(displayedMessages, state.firstUnreadMessageUuid) {
+        remember(state.messages.itemCount, state.firstUnreadMessageUuid) {
             derivedStateOf {
                 val uuid = state.firstUnreadMessageUuid ?: return@derivedStateOf null
-                displayedMessages.indexOfFirst { it.uuid == uuid }.takeIf { it != -1 }
+                state.messages.itemSnapshotList.indexOfFirst { it?.uuid == uuid }.takeIf { it != -1 }
             }
         }
 
@@ -303,13 +314,13 @@ private fun MessageListPagedContent(
             contentPadding = PaddingValues(bottom = 24.dp),
         ) {
             items(
-                count = displayedMessages.size,
-                key = { index -> displayedMessages[index].uuid },
-                contentType = { "message" },
+                count = state.messages.itemCount,
+                key = state.messages.itemKey { it.uuid },
+                contentType = state.messages.itemContentType { "message" },
             ) { index ->
-                val message = displayedMessages[index]
-                val visuallyPrevMessage = if (index < displayedMessages.size - 1) displayedMessages[index + 1] else null
-                val visuallyNextMessage = if (index > 0) displayedMessages[index - 1] else null
+                val message = state.messages[index] ?: return@items
+                val visuallyPrevMessage = if (index < state.messages.itemCount - 1) state.messages[index + 1] else null
+                val visuallyNextMessage = if (index > 0) state.messages[index - 1] else null
 
                 val hasSamePrev =
                     if (visuallyPrevMessage != null) {
@@ -332,8 +343,6 @@ private fun MessageListPagedContent(
                     val itemModifier = if (enableAnimations) Modifier.animateItem() else Modifier
 
                     if (isFirstUnread) {
-                        // Wrap in Column to prevent overlapping of divider and message item
-                        // Apply animation to the container Column once
                         Column(modifier = itemModifier) {
                             UnreadMessagesDivider()
                             RenderPagedChatMessageRow(
@@ -377,6 +386,21 @@ private fun MessageListPagedContent(
                             hasSameNext = hasSameNext,
                             quickEmojis = quickEmojis,
                         )
+                    }
+                }
+            }
+
+            state.messages.apply {
+                when {
+                    loadState.append is LoadState.Loading -> {
+                        item(key = "append_loading", contentType = "loading") {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        }
                     }
                 }
             }
