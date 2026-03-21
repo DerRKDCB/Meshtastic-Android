@@ -82,7 +82,6 @@ internal data class MessageListHandlers(
 internal data class MessageListPagedState(
     val nodes: List<Node>,
     val ourNode: Node?,
-    val messages: LazyPagingItems<Message>,
     val timelineMessages: List<Message>,
     val imageChunkMessages: List<Message>,
     val selectedIds: MutableState<Set<Long>>,
