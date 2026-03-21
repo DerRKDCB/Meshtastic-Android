@@ -35,18 +35,8 @@ class ImageChunkParserTest {
     }
 
     @Test
-    fun parseImageChunk_parsesLegacyFormat() {
-        val parsed = parseImageChunk("IMG:image123|PART:2/5|DATA:abcDEF012+/=")
-
-        assertNotNull(parsed)
-        assertEquals("image123", parsed.imageId)
-        assertEquals(2, parsed.partIndex)
-        assertEquals(5, parsed.totalParts)
-        assertEquals("abcDEF012+/=", parsed.payload)
-    }
-
-    @Test
     fun parseImageChunk_rejectsInvalidFormat() {
+        assertNull(parseImageChunk("IMG:image123|PART:2/5|DATA:abcDEF012+/="))
         assertNull(parseImageChunk("IMG:image123|PART:2/5|abcDEF012+/="))
         assertNull(parseImageChunk("IMG:image123|0/5|abcDEF012+/="))
         assertNull(parseImageChunk("IMG:image123|6/5|abcDEF012+/="))

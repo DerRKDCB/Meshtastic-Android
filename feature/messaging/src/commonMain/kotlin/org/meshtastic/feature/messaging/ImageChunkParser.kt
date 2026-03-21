@@ -26,14 +26,10 @@ internal data class ImageChunk(
 )
 
 private val compactImageChunkRegex = Regex("^IMG:([^|]+)\\|(\\d+)/(\\d+)\\|([\\s\\S]+)$")
-private val legacyImageChunkRegex = Regex("^IMG:([^|]+)\\|PART:(\\d+)/(\\d+)\\|DATA:([\\s\\S]+)$")
 
 internal fun parseImageChunk(text: String): ImageChunk? {
     val normalizedText = text.trim()
-    val match =
-        compactImageChunkRegex.matchEntire(normalizedText)
-            ?: legacyImageChunkRegex.matchEntire(normalizedText)
-            ?: return null
+    val match = compactImageChunkRegex.matchEntire(normalizedText) ?: return null
     val imageId = match.groupValues[1]
     val partIndex = match.groupValues[2].toIntOrNull() ?: return null
     val totalParts = match.groupValues[3].toIntOrNull() ?: return null
