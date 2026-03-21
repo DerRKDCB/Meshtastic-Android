@@ -309,8 +309,16 @@ internal fun buildPrivateImageRenderState(
 
     chunkMessages.groupBy { it.payloadId }.values.forEach { group ->
         val expectedCount = group.firstOrNull()?.count ?: return@forEach
-        val chunksByIndex = group.associateBy { it.index }
+        val chunksByIndex =
+            group
+                .groupBy { it.index }
+                .mapValues { (_, duplicateChunks) ->
+                    duplicateChunks.maxWithOrNull(
+                        compareBy<ChunkMessage>({ it.message.receivedTime }, { it.message.uuid }),
+                    ) ?: return@forEach
+                }
         val availableChunks = chunksByIndex.size
+        val duplicateChunkCount = group.size - availableChunks
         val payloadId = group.firstOrNull()?.payloadId ?: return@forEach
         val senderNum = group.firstOrNull()?.message?.node?.num ?: 0
         val cacheKey = "$senderNum:$payloadId"
@@ -320,7 +328,7 @@ internal fun buildPrivateImageRenderState(
         val bitmap =
             if (shouldRetryDecode) {
                 timelineImageLogger.d {
-                    "decode attempt: cacheKey=$cacheKey payloadId=$payloadId availableChunks=$availableChunks expectedCount=$expectedCount cachedAttempted=${cachedEntry?.attemptedChunkCount ?: 0}"
+                    "decode attempt: cacheKey=$cacheKey payloadId=$payloadId availableChunks=$availableChunks expectedCount=$expectedCount duplicates=$duplicateChunkCount cachedAttempted=${cachedEntry?.attemptedChunkCount ?: 0}"
                 }
                 val payloadBytes =
                     ByteArrayOutputStream().use { output ->
@@ -336,7 +344,7 @@ internal fun buildPrivateImageRenderState(
                             attemptedChunkCount = availableChunks,
                         )
                     timelineImageLogger.d {
-                        "decode stored: cacheKey=$cacheKey decoded=${decodedBitmap != null} payloadBytes=${payloadBytes.size} availableChunks=$availableChunks expectedCount=$expectedCount"
+                        "decode stored: cacheKey=$cacheKey decoded=${decodedBitmap != null} payloadBytes=${payloadBytes.size} availableChunks=$availableChunks expectedCount=$expectedCount duplicates=$duplicateChunkCount"
                     }
                 }
             } else {
