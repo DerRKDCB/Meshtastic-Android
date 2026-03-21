@@ -16,8 +16,6 @@
  */
 package org.meshtastic.feature.messaging
 
-import android.graphics.Bitmap
-import co.touchlab.kermit.Logger
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -67,16 +65,16 @@ import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
+import org.meshtastic.feature.messaging.image.ExpandedTimelineImageSelection
 import org.meshtastic.feature.messaging.image.PrivateImageDecodeCacheEntry
 import org.meshtastic.feature.messaging.image.TimelinePrivateImageMessageData
-import org.meshtastic.feature.messaging.image.ExpandedTimelineImageDialog
+import org.meshtastic.feature.messaging.image.TimelineExpandedImagePreviewHost
 import org.meshtastic.feature.messaging.image.buildPrivateImageRenderState
+import org.meshtastic.feature.messaging.image.selectExpandedTimelineImage
 import org.meshtastic.feature.messaging.component.MessageItem
 import org.meshtastic.feature.messaging.component.MessageStatusDialog
 import org.meshtastic.feature.messaging.component.ReactionDialog
 import org.meshtastic.feature.messaging.component.UnreadMessagesDivider
-
-private val timelineImageLogger = Logger.withTag("MsgTimelineImage")
 
 internal data class MessageListHandlers(
     val onUnreadChanged: (Long, Long) -> Unit,
@@ -156,11 +154,6 @@ internal fun MessageListPaged(
     }
 
     val coroutineScope = rememberCoroutineScope()
-    var expandedImage by remember { mutableStateOf<Bitmap?>(null) }
-
-    expandedImage?.let { bitmap ->
-        ExpandedTimelineImageDialog(bitmap = bitmap, onDismiss = { expandedImage = null })
-    }
 
     // Disable auto-scroll when any dialog is open to prevent list jumping
     val hasDialogOpen = showStatusDialog != null || showReactionDialog != null
@@ -186,10 +179,6 @@ internal fun MessageListPaged(
         haptics = haptics,
         onShowStatusDialog = { showStatusDialog = it },
         onShowReactions = { showReactionDialog = it },
-        onInlineImageClick = { bitmap ->
-            timelineImageLogger.d { "inline image click: width=${bitmap.width} height=${bitmap.height}" }
-            expandedImage = bitmap
-        },
         modifier = modifier,
         quickEmojis = quickEmojis,
     )
@@ -207,19 +196,43 @@ private fun MessageListPagedContent(
     haptics: HapticFeedback,
     onShowStatusDialog: (Message) -> Unit,
     onShowReactions: (List<Reaction>) -> Unit,
-    onInlineImageClick: (Bitmap) -> Unit,
     modifier: Modifier = Modifier,
     quickEmojis: List<String>,
 ) {
     val privateImageDecodeCache = remember { mutableMapOf<String, PrivateImageDecodeCacheEntry>() }
+    var expandedImageSelection by remember { mutableStateOf<ExpandedTimelineImageSelection?>(null) }
 
-    val privateImageRenderState by
+    val snapshotMessages by
         remember(state.messages.itemCount) {
             derivedStateOf {
-                val snapshotMessages =
-                    state.messages.itemSnapshotList.items
-                        .filterNotNull()
+                state.messages.itemSnapshotList.items
+                    .filterNotNull()
+            }
+        }
+
+    val privateImageRenderState by
+        remember(snapshotMessages) {
+            derivedStateOf {
                 buildPrivateImageRenderState(snapshotMessages, privateImageDecodeCache)
+            }
+        }
+
+    TimelineExpandedImagePreviewHost(
+        selection = expandedImageSelection,
+        privateImageRenderState = privateImageRenderState,
+        messages = snapshotMessages,
+        onDismiss = { expandedImageSelection = null },
+    )
+
+    val onInlineImageClick: (Int, Int) -> Unit =
+        remember {
+            { payloadId, senderNum ->
+                selectExpandedTimelineImage(
+                    payloadId = payloadId,
+                    senderNum = senderNum,
+                ) { selection ->
+                    expandedImageSelection = selection
+                }
             }
         }
 
@@ -353,7 +366,7 @@ private fun RenderPagedChatMessageRow(
     listState: LazyListState,
     onShowStatusDialog: (Message) -> Unit,
     onShowReactions: (List<Reaction>) -> Unit,
-    onInlineImageClick: (Bitmap) -> Unit,
+    onInlineImageClick: (Int, Int) -> Unit,
     modifier: Modifier = Modifier,
     showUserName: Boolean,
     hasSamePrev: Boolean,
@@ -425,7 +438,9 @@ private fun RenderPagedChatMessageRow(
         },
         onDecodeImage = { handlers.onDecodeImage(message) },
         onInlineImageClick = {
-            inlineImageData?.bitmap?.let(onInlineImageClick)
+            message.privatePayloadId?.let { payloadId ->
+                onInlineImageClick(payloadId, message.node.num)
+            }
         },
         hasSamePrev = hasSamePrev,
         hasSameNext = hasSameNext,
