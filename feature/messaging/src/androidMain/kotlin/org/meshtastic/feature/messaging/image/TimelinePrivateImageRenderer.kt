@@ -27,8 +27,12 @@ import org.meshtastic.core.model.Message
 import org.meshtastic.proto.PortNum
 
 internal data class TimelinePrivateImageRenderState(
-    val imageByMessageUuid: Map<Long, TimelinePrivateImageMessageData>,
-    val hiddenChunkMessageUuids: Set<Long>,
+    val imageByPayloadKey: Map<TimelineImagePayloadKey, TimelinePrivateImageMessageData>,
+)
+
+internal data class TimelineImagePayloadKey(
+    val senderNum: Int,
+    val payloadId: Int,
 )
 
 internal data class PrivateImageDecodeCacheEntry(
@@ -186,11 +190,10 @@ internal fun buildPrivateImageRenderState(
 
     if (chunkMessages.isEmpty()) {
         timelineImageLogger.d { "buildPrivateImageRenderState: no chunk messages in snapshot=${messages.size}" }
-        return TimelinePrivateImageRenderState(emptyMap(), emptySet())
+        return TimelinePrivateImageRenderState(emptyMap())
     }
 
-    val imageByMessageUuid = mutableMapOf<Long, TimelinePrivateImageMessageData>()
-    val hiddenChunkMessageUuids = mutableSetOf<Long>()
+    val imageByPayloadKey = mutableMapOf<TimelineImagePayloadKey, TimelinePrivateImageMessageData>()
 
     chunkMessages.groupBy { it.payloadId }.values.forEach { group ->
         val expectedCount = group.firstOrNull()?.count ?: return@forEach
@@ -230,21 +233,17 @@ internal fun buildPrivateImageRenderState(
                 }
                 cachedEntry.bitmap
             }
-        val renderedMessage = group.maxByOrNull { it.index }?.message
-        if (renderedMessage != null) {
-            imageByMessageUuid[renderedMessage.uuid] =
-                TimelinePrivateImageMessageData(
-                    bitmap = bitmap,
-                    availableChunks = availableChunks,
-                    totalChunks = expectedCount,
-                )
-            group.filter { it.message.uuid != renderedMessage.uuid }.forEach { hiddenChunkMessageUuids += it.message.uuid }
-        }
+        imageByPayloadKey[TimelineImagePayloadKey(senderNum = senderNum, payloadId = payloadId)] =
+            TimelinePrivateImageMessageData(
+                bitmap = bitmap,
+                availableChunks = availableChunks,
+                totalChunks = expectedCount,
+            )
     }
 
     timelineImageLogger.d {
-        "buildPrivateImageRenderState summary: messages=${messages.size} chunkMessages=${chunkMessages.size} renderedImages=${imageByMessageUuid.size} hiddenRows=${hiddenChunkMessageUuids.size}"
+        "buildPrivateImageRenderState summary: messages=${messages.size} chunkMessages=${chunkMessages.size} renderedImages=${imageByPayloadKey.size}"
     }
 
-    return TimelinePrivateImageRenderState(imageByMessageUuid, hiddenChunkMessageUuids)
+    return TimelinePrivateImageRenderState(imageByPayloadKey)
 }

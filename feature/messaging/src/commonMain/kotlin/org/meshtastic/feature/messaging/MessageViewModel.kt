@@ -154,6 +154,12 @@ class MessageViewModel(
             .flatMapLatest { packetRepository.getFilteredCountFlow(it) }
             .stateInWhileSubscribed(0)
 
+    val imageChunkMessages: StateFlow<List<Message>> =
+        contactKeyForPagedMessages
+            .filterNotNull()
+            .flatMapLatest { packetRepository.getImageChunksFrom(it, ::getNode) }
+            .stateInWhileSubscribed(emptyList())
+
     init {
         val contactKey = savedStateHandle.get<String>("contactKey")
         if (contactKey != null) {

@@ -50,10 +50,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
-import androidx.paging.compose.itemContentType
-import androidx.paging.compose.itemKey
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
@@ -67,6 +64,7 @@ import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
 import org.meshtastic.feature.messaging.image.ExpandedTimelineImageSelection
 import org.meshtastic.feature.messaging.image.PrivateImageDecodeCacheEntry
+import org.meshtastic.feature.messaging.image.TimelineImagePayloadKey
 import org.meshtastic.feature.messaging.image.TimelinePrivateImageMessageData
 import org.meshtastic.feature.messaging.image.TimelineExpandedImagePreviewHost
 import org.meshtastic.feature.messaging.image.buildPrivateImageRenderState
@@ -90,6 +88,7 @@ internal data class MessageListPagedState(
     val nodes: List<Node>,
     val ourNode: Node?,
     val messages: LazyPagingItems<Message>,
+    val imageChunkMessages: List<Message>,
     val selectedIds: MutableState<Set<Long>>,
     val contactKey: String,
     val firstUnreadMessageUuid: Long? = null,
@@ -107,6 +106,21 @@ private fun MutableState<Set<Long>>.toggle(uuid: Long) {
             value + uuid
         }
 }
+
+private fun MessageListPagedState.deleteUuidsFor(message: Message): List<Long> {
+    val payloadId = message.privatePayloadId ?: return listOf(message.uuid)
+    val senderNum = message.node.num
+    val payloadMessages =
+        imageChunkMessages.filter { chunk ->
+            chunk.privatePayloadId == payloadId && chunk.node.num == senderNum
+        }
+    return payloadMessages.map { it.uuid }.ifEmpty { listOf(message.uuid) }
+}
+
+private data class LoadedTimelineImageRows(
+    val imageByMessageUuid: Map<Long, TimelinePrivateImageMessageData>,
+    val hiddenChunkMessageUuids: Set<Long>,
+)
 
 @Composable
 internal fun MessageListPaged(
@@ -202,25 +216,70 @@ private fun MessageListPagedContent(
     val privateImageDecodeCache = remember { mutableMapOf<String, PrivateImageDecodeCacheEntry>() }
     var expandedImageSelection by remember { mutableStateOf<ExpandedTimelineImageSelection?>(null) }
 
-    val snapshotMessages by
+    val currentLoadedMessages by
         remember(state.messages.itemCount) {
+            derivedStateOf { state.messages.itemSnapshotList.items.filterNotNull() }
+        }
+    val refreshLoading = state.messages.loadState.refresh is LoadState.Loading
+    var renderedMessages by remember { mutableStateOf<List<Message>>(emptyList()) }
+
+    LaunchedEffect(currentLoadedMessages, refreshLoading) {
+        if (renderedMessages.isEmpty() || !refreshLoading) {
+            renderedMessages = currentLoadedMessages
+        }
+    }
+
+    val displayedMessages = if (renderedMessages.isNotEmpty()) renderedMessages else currentLoadedMessages
+
+    val privateImageRenderState by
+        remember(state.imageChunkMessages) {
             derivedStateOf {
-                state.messages.itemSnapshotList.items
-                    .filterNotNull()
+                buildPrivateImageRenderState(state.imageChunkMessages, privateImageDecodeCache)
             }
         }
 
-    val privateImageRenderState by
-        remember(snapshotMessages) {
+    val representativeRowUuidByPayload = remember { mutableMapOf<TimelineImagePayloadKey, Long>() }
+
+    val loadedImageRows by
+        remember(displayedMessages, privateImageRenderState) {
             derivedStateOf {
-                buildPrivateImageRenderState(snapshotMessages, privateImageDecodeCache)
+                val imageByMessageUuid = mutableMapOf<Long, TimelinePrivateImageMessageData>()
+                val hiddenChunkMessageUuids = mutableSetOf<Long>()
+                val activePayloadKeys = mutableSetOf<TimelineImagePayloadKey>()
+
+                displayedMessages
+                    .filter { it.privatePayloadId != null && it.privateChunkIndex != null }
+                    .groupBy {
+                        TimelineImagePayloadKey(
+                            senderNum = it.node.num,
+                            payloadId = it.privatePayloadId ?: -1,
+                        )
+                    }
+                    .forEach { (payloadKey, group) ->
+                        activePayloadKeys += payloadKey
+                        val imageData = privateImageRenderState.imageByPayloadKey[payloadKey] ?: return@forEach
+                        val representative =
+                            representativeRowUuidByPayload[payloadKey]
+                                ?.let { stableUuid -> group.firstOrNull { it.uuid == stableUuid } }
+                                ?: group.minByOrNull { it.privateChunkIndex ?: Int.MAX_VALUE }
+                                ?: return@forEach
+                        representativeRowUuidByPayload[payloadKey] = representative.uuid
+                        imageByMessageUuid[representative.uuid] = imageData
+                        group.filter { it.uuid != representative.uuid }.forEach { hiddenChunkMessageUuids += it.uuid }
+                    }
+
+                representativeRowUuidByPayload.keys.retainAll(activePayloadKeys)
+
+                LoadedTimelineImageRows(
+                    imageByMessageUuid = imageByMessageUuid,
+                    hiddenChunkMessageUuids = hiddenChunkMessageUuids,
+                )
             }
         }
 
     TimelineExpandedImagePreviewHost(
         selection = expandedImageSelection,
         privateImageRenderState = privateImageRenderState,
-        messages = snapshotMessages,
         onDismiss = { expandedImageSelection = null },
     )
 
@@ -239,10 +298,10 @@ private fun MessageListPagedContent(
     // Calculate unread divider position using snapshot to avoid side-effects and improve performance
     // Optimized: Use full snapshot index to correctly match LazyColumn index range
     val unreadDividerIndex by
-        remember(state.messages.itemCount, state.firstUnreadMessageUuid) {
+        remember(displayedMessages, state.firstUnreadMessageUuid) {
             derivedStateOf {
                 val uuid = state.firstUnreadMessageUuid ?: return@derivedStateOf null
-                state.messages.itemSnapshotList.indexOfFirst { it?.uuid == uuid }.takeIf { it != -1 }
+                displayedMessages.indexOfFirst { it.uuid == uuid }.takeIf { it != -1 }
             }
         }
 
@@ -257,16 +316,16 @@ private fun MessageListPagedContent(
             contentPadding = PaddingValues(bottom = 24.dp),
         ) {
             items(
-                count = state.messages.itemCount,
-                key = state.messages.itemKey { it.uuid },
-                contentType = state.messages.itemContentType { "message" },
+                count = displayedMessages.size,
+                key = { index -> displayedMessages[index].uuid },
+                contentType = { "message" },
             ) { index ->
-                val message = state.messages[index]
-                val visuallyPrevMessage = if (index < state.messages.itemCount - 1) state.messages[index + 1] else null
-                val visuallyNextMessage = if (index > 0) state.messages[index - 1] else null
+                val message = displayedMessages[index]
+                val visuallyPrevMessage = if (index < displayedMessages.size - 1) displayedMessages[index + 1] else null
+                val visuallyNextMessage = if (index > 0) displayedMessages[index - 1] else null
 
                 val hasSamePrev =
-                    if (message != null && visuallyPrevMessage != null) {
+                    if (visuallyPrevMessage != null) {
                         visuallyPrevMessage.fromLocal == message.fromLocal &&
                             (message.fromLocal || visuallyPrevMessage.node.num == message.node.num)
                     } else {
@@ -274,14 +333,14 @@ private fun MessageListPagedContent(
                     }
 
                 val hasSameNext =
-                    if (message != null && visuallyNextMessage != null) {
+                    if (visuallyNextMessage != null) {
                         visuallyNextMessage.fromLocal == message.fromLocal &&
                             (message.fromLocal || visuallyNextMessage.node.num == message.node.num)
                     } else {
                         false
                     }
 
-                if (message != null && message.uuid !in privateImageRenderState.hiddenChunkMessageUuids) {
+                if (message.uuid !in loadedImageRows.hiddenChunkMessageUuids) {
                     val isFirstUnread = state.hasUnreadMessages && unreadDividerIndex == index
                     val itemModifier = if (enableAnimations) Modifier.animateItem() else Modifier
 
@@ -292,7 +351,7 @@ private fun MessageListPagedContent(
                             UnreadMessagesDivider()
                             RenderPagedChatMessageRow(
                                 message = message,
-                                inlineImageData = privateImageRenderState.imageByMessageUuid[message.uuid],
+                                inlineImageData = loadedImageRows.imageByMessageUuid[message.uuid],
                                 state = state,
                                 nodeMap = nodeMap,
                                 handlers = handlers,
@@ -300,6 +359,7 @@ private fun MessageListPagedContent(
                                 coroutineScope = coroutineScope,
                                 haptics = haptics,
                                 listState = listState,
+                                displayedMessages = displayedMessages,
                                 onShowStatusDialog = onShowStatusDialog,
                                 onShowReactions = onShowReactions,
                                 onInlineImageClick = onInlineImageClick,
@@ -312,7 +372,7 @@ private fun MessageListPagedContent(
                     } else {
                         RenderPagedChatMessageRow(
                             message = message,
-                            inlineImageData = privateImageRenderState.imageByMessageUuid[message.uuid],
+                            inlineImageData = loadedImageRows.imageByMessageUuid[message.uuid],
                             state = state,
                             nodeMap = nodeMap,
                             handlers = handlers,
@@ -320,6 +380,7 @@ private fun MessageListPagedContent(
                             coroutineScope = coroutineScope,
                             haptics = haptics,
                             listState = listState,
+                            displayedMessages = displayedMessages,
                             onShowStatusDialog = onShowStatusDialog,
                             onShowReactions = onShowReactions,
                             onInlineImageClick = onInlineImageClick,
@@ -364,6 +425,7 @@ private fun RenderPagedChatMessageRow(
     coroutineScope: CoroutineScope,
     haptics: HapticFeedback,
     listState: LazyListState,
+    displayedMessages: List<Message>,
     onShowStatusDialog: (Message) -> Unit,
     onShowReactions: (List<Reaction>) -> Unit,
     onInlineImageClick: (Int, Int) -> Unit,
@@ -405,7 +467,7 @@ private fun RenderPagedChatMessageRow(
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         },
         onSelect = { state.selectedIds.toggle(message.uuid) },
-        onDelete = { handlers.onDeleteMessages(listOf(message.uuid)) },
+        onDelete = { handlers.onDeleteMessages(state.deleteUuidsFor(message)) },
         onClickChip = handlers.onClickChip,
         onStatusClick = { onShowStatusDialog(message) },
         onReply = { handlers.onReply(message) },
@@ -426,10 +488,7 @@ private fun RenderPagedChatMessageRow(
         onShowReactions = { onShowReactions(message.emojis) },
         onNavigateToOriginalMessage = {
             coroutineScope.launch {
-                // Note: With pagination, we can't guarantee the original message is loaded
-                // Optimized: Use snapshot to find index to avoid side-effects during search
-                val targetIndex =
-                    state.messages.itemSnapshotList.indexOfFirst { it?.packetId == message.replyId }.takeIf { it != -1 }
+                val targetIndex = displayedMessages.indexOfFirst { it.packetId == message.replyId }.takeIf { it != -1 }
 
                 if (targetIndex != null) {
                     listState.animateScrollToItem(index = targetIndex)

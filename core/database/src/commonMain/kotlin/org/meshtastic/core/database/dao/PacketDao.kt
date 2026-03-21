@@ -205,6 +205,17 @@ interface PacketDao {
     )
     fun getMessagesFromPaged(contact: String): PagingSource<Int, PacketEntity>
 
+    @Transaction
+    @Query(
+        """
+    SELECT * FROM packet
+    WHERE (myNodeNum = 0 OR myNodeNum = (SELECT myNodeNum FROM my_node))
+        AND port_num = 256 AND contact_key = :contact
+    ORDER BY received_time ASC
+    """,
+    )
+    fun getImageChunksFrom(contact: String): Flow<List<PacketEntity>>
+
     @Query(
         """
     SELECT * FROM packet

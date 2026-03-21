@@ -165,6 +165,13 @@ class PacketRepositoryImpl(private val dbManager: DatabaseProvider, private val 
         }
     }
 
+    override fun getImageChunksFrom(contact: String, getNode: suspend (String?) -> Node): Flow<List<Message>> =
+        dbManager.currentDb
+            .flatMapLatest { db -> db.packetDao().getImageChunksFrom(contact) }
+            .mapLatest { packets ->
+                packets.map { packet -> packet.toMessage(getNode) }
+            }
+
     override fun getMessagesFromPaged(contact: String, getNode: suspend (String?) -> Node): Flow<PagingData<Message>> =
         Pager(
             config =

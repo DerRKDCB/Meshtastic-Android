@@ -45,22 +45,18 @@ internal fun selectExpandedTimelineImage(
 internal fun TimelineExpandedImagePreviewHost(
     selection: ExpandedTimelineImageSelection?,
     privateImageRenderState: TimelinePrivateImageRenderState,
-    messages: List<Message>,
     onDismiss: () -> Unit,
 ) {
-    val messagesByUuid by remember(messages) { derivedStateOf { messages.associateBy { it.uuid } } }
-
     val expandedImageBitmap by
-        remember(selection, privateImageRenderState, messagesByUuid) {
+        remember(selection, privateImageRenderState) {
             derivedStateOf {
                 val currentSelection = selection ?: return@derivedStateOf null
-                privateImageRenderState.imageByMessageUuid.entries
-                    .firstOrNull { (uuid, _) ->
-                        val message = messagesByUuid[uuid]
-                        message?.privatePayloadId == currentSelection.payloadId && message.node.num == currentSelection.senderNum
-                    }
-                    ?.value
-                    ?.bitmap
+                privateImageRenderState.imageByPayloadKey[
+                    TimelineImagePayloadKey(
+                        senderNum = currentSelection.senderNum,
+                        payloadId = currentSelection.payloadId,
+                    ),
+                ]?.bitmap
             }
         }
 
