@@ -21,6 +21,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.provider.MediaStore
+import co.touchlab.kermit.Logger
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -112,6 +113,8 @@ private data class TimelinePrivateImageMessageData(
     val totalChunks: Int,
 )
 
+private val timelineImageLogger = Logger.withTag("MsgTimelineImage")
+
 private fun isGzipPayload(inputBytes: ByteArray): Boolean {
     return inputBytes.size >= 2 && inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
 }
@@ -153,6 +156,7 @@ private fun gzipDataOffset(inputBytes: ByteArray): Int? {
 
 private fun gunzipStrict(inputBytes: ByteArray): ByteArray? {
     if (!isGzipPayload(inputBytes)) {
+        timelineImageLogger.d { "gunzipStrict skipped: not-gzip bytes=${inputBytes.size}" }
         return null
     }
     return runCatching {
@@ -161,7 +165,9 @@ private fun gunzipStrict(inputBytes: ByteArray): ByteArray? {
                 gzipInput.readBytes()
             }
         }
-    }.getOrNull()
+    }.getOrNull().also { output ->
+        timelineImageLogger.d { "gunzipStrict result: success=${output != null} inputBytes=${inputBytes.size} outputBytes=${output?.size ?: 0}" }
+    }
 }
 
 private fun gunzipBestEffortPartial(inputBytes: ByteArray): ByteArray? {
@@ -182,12 +188,16 @@ private fun gunzipBestEffortPartial(inputBytes: ByteArray): ByteArray? {
             output.toByteArray().takeIf { it.isNotEmpty() }
         }
     }.getOrNull().also {
+        timelineImageLogger.d {
+            "gunzipBestEffortPartial result: success=${it != null} inputBytes=${inputBytes.size} outputBytes=${it?.size ?: 0} dataOffset=$dataOffset"
+        }
         inflater.end()
     }
 }
 
 private fun decodeBitmapBestEffort(payloadBytes: ByteArray): Bitmap? {
     if (payloadBytes.isEmpty()) {
+        timelineImageLogger.d { "decodeBitmapBestEffort skipped: empty payload" }
         return null
     }
 
@@ -198,12 +208,25 @@ private fun decodeBitmapBestEffort(payloadBytes: ByteArray): Bitmap? {
     gunzipBestEffortPartial(payloadBytes)?.let { candidates += it }
 
     candidates.forEach { candidateBytes ->
-        BitmapFactory.decodeByteArray(candidateBytes, 0, candidateBytes.size)?.let { return it }
+        BitmapFactory.decodeByteArray(candidateBytes, 0, candidateBytes.size)?.let {
+            timelineImageLogger.d {
+                "decodeBitmapBestEffort decoded direct: payloadBytes=${payloadBytes.size} candidateBytes=${candidateBytes.size}"
+            }
+            return it
+        }
 
         val withEoi = candidateBytes + byteArrayOf(0xFF.toByte(), 0xD9.toByte())
-        BitmapFactory.decodeByteArray(withEoi, 0, withEoi.size)?.let { return it }
+        BitmapFactory.decodeByteArray(withEoi, 0, withEoi.size)?.let {
+            timelineImageLogger.d {
+                "decodeBitmapBestEffort decoded withEOI: payloadBytes=${payloadBytes.size} candidateBytes=${candidateBytes.size}"
+            }
+            return it
+        }
     }
 
+    timelineImageLogger.d {
+        "decodeBitmapBestEffort failed: payloadBytes=${payloadBytes.size} candidates=${candidates.size}"
+    }
     return null
 }
 
@@ -233,6 +256,7 @@ private fun buildPrivateImageRenderState(
         }
 
     if (chunkMessages.isEmpty()) {
+        timelineImageLogger.d { "buildPrivateImageRenderState: no chunk messages in snapshot=${messages.size}" }
         return TimelinePrivateImageRenderState(emptyMap(), emptySet())
     }
 
@@ -251,6 +275,9 @@ private fun buildPrivateImageRenderState(
         val shouldRetryDecode = cachedEntry == null || availableChunks > cachedEntry.attemptedChunkCount
         val bitmap =
             if (shouldRetryDecode) {
+                timelineImageLogger.d {
+                    "decode attempt: cacheKey=$cacheKey payloadId=$payloadId availableChunks=$availableChunks expectedCount=$expectedCount cachedAttempted=${cachedEntry?.attemptedChunkCount ?: 0}"
+                }
                 val payloadBytes =
                     ByteArrayOutputStream().use { output ->
                         chunksByIndex.keys.sorted()
@@ -264,8 +291,14 @@ private fun buildPrivateImageRenderState(
                             bitmap = decodedBitmap,
                             attemptedChunkCount = availableChunks,
                         )
+                    timelineImageLogger.d {
+                        "decode stored: cacheKey=$cacheKey decoded=${decodedBitmap != null} payloadBytes=${payloadBytes.size} availableChunks=$availableChunks expectedCount=$expectedCount"
+                    }
                 }
             } else {
+                timelineImageLogger.d {
+                    "decode cache hit: cacheKey=$cacheKey bitmap=${cachedEntry.bitmap != null} attemptedChunkCount=${cachedEntry.attemptedChunkCount}"
+                }
                 cachedEntry.bitmap
             }
         val renderedMessage = group.maxByOrNull { it.index }?.message
@@ -278,6 +311,10 @@ private fun buildPrivateImageRenderState(
                 )
             group.filter { it.message.uuid != renderedMessage.uuid }.forEach { hiddenChunkMessageUuids += it.message.uuid }
         }
+    }
+
+    timelineImageLogger.d {
+        "buildPrivateImageRenderState summary: messages=${messages.size} chunkMessages=${chunkMessages.size} renderedImages=${imageByMessageUuid.size} hiddenRows=${hiddenChunkMessageUuids.size}"
     }
 
     return TimelinePrivateImageRenderState(imageByMessageUuid, hiddenChunkMessageUuids)
@@ -391,6 +428,9 @@ internal fun MessageListPaged(
                                 onClick = {
                                     coroutineScope.launch {
                                         val success = withContext(Dispatchers.IO) { saveBitmapToGallery(context, bitmap) }
+                                        timelineImageLogger.d {
+                                            "expanded image save requested: success=$success width=${bitmap.width} height=${bitmap.height}"
+                                        }
                                         saveResultMessageRes =
                                             if (success) {
                                                 Res.string.decode_image_saved
@@ -437,6 +477,7 @@ internal fun MessageListPaged(
         onShowStatusDialog = { showStatusDialog = it },
         onShowReactions = { showReactionDialog = it },
         onInlineImageClick = { bitmap ->
+            timelineImageLogger.d { "inline image click: width=${bitmap.width} height=${bitmap.height}" }
             expandedImage = bitmap
             saveResultMessageRes = null
         },
@@ -694,13 +735,17 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
         }
 
     val resolver = context.contentResolver
-    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: run {
+        timelineImageLogger.w { "timeline save failed: insert returned null" }
+        return false
+    }
     return runCatching {
         resolver.openOutputStream(uri)?.use { output ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)
         } ?: false
     }
         .getOrElse {
+            timelineImageLogger.e(it) { "timeline save exception uri=$uri" }
             resolver.delete(uri, null, null)
             false
         }
@@ -711,6 +756,9 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
             }
             if (!success) {
                 resolver.delete(uri, null, null)
+            }
+            timelineImageLogger.d {
+                "timeline save result: success=$success uri=$uri width=${bitmap.width} height=${bitmap.height}"
             }
         }
 }

@@ -26,6 +26,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.text.format.DateUtils
+import co.touchlab.kermit.Logger
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
@@ -172,6 +173,7 @@ private const val MIN_IMAGE_DUTY_CYCLE_PERCENT = 0.1f
 private const val DEFAULT_IMAGE_DUTY_CYCLE_PERCENT = 1.0f
 private const val MAX_AUTO_IMAGE_JPEG_QUALITY = 90
 private const val TRANSMISSION_TIME_SLIDER_STEPS = 10
+private val imagePipelineLogger = Logger.withTag("MsgImagePipeline")
 
 private data class ModemAirtimeParams(
     val spreadFactor: Int,
@@ -807,41 +809,68 @@ private fun scanImageChunks(
 }
 
 private fun decodeBitmapFromChunks(partsByIndex: Map<Int, String>, totalParts: Int): Bitmap? {
-    if (totalParts <= 0 || partsByIndex.isEmpty()) return null
-    if ((1..totalParts).any { partIndex -> !partsByIndex.containsKey(partIndex) }) return null
+    if (totalParts <= 0 || partsByIndex.isEmpty()) {
+        imagePipelineLogger.d { "decodeBitmapFromChunks skipped: totalParts=$totalParts availableParts=${partsByIndex.size}" }
+        return null
+    }
+    if ((1..totalParts).any { partIndex -> !partsByIndex.containsKey(partIndex) }) {
+        imagePipelineLogger.d { "decodeBitmapFromChunks waiting: totalParts=$totalParts availableParts=${partsByIndex.size}" }
+        return null
+    }
     val payload =
         (1..totalParts)
             .mapNotNull { partIndex -> partsByIndex[partIndex] }
             .joinToString(separator = "")
             .replace(Regex("\\s+"), "")
-    if (payload.isEmpty()) return null
+    if (payload.isEmpty()) {
+        imagePipelineLogger.d { "decodeBitmapFromChunks failed: empty base64 payload" }
+        return null
+    }
     val payloadBytes = runCatching { Base64.decode(payload, Base64.DEFAULT) }.getOrNull() ?: return null
     val imageBytes = maybeGunzip(payloadBytes)
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).also { bitmap ->
+        imagePipelineLogger.d {
+            "decodeBitmapFromChunks result: decoded=${bitmap != null} payloadBytes=${payloadBytes.size} imageBytes=${imageBytes.size}"
+        }
+    }
 }
 
 private fun maybeGzip(inputBytes: ByteArray, isEnabled: Boolean): ByteArray {
-    if (!isEnabled) return inputBytes
+    if (!isEnabled) {
+        imagePipelineLogger.d { "maybeGzip disabled: inputBytes=${inputBytes.size}" }
+        return inputBytes
+    }
     return runCatching {
         val outputStream = ByteArrayOutputStream()
         GZIPOutputStream(outputStream).use { gzip ->
             gzip.write(inputBytes)
         }
         outputStream.toByteArray()
-    }.getOrDefault(inputBytes)
+    }.getOrDefault(inputBytes).also { outputBytes ->
+        imagePipelineLogger.d {
+            "maybeGzip result: inputBytes=${inputBytes.size} outputBytes=${outputBytes.size} usedGzip=${outputBytes.size != inputBytes.size || isEnabled}"
+        }
+    }
 }
 
 private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
     if (inputBytes.size < 2) return inputBytes
     val isGzip = inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
-    if (!isGzip) return inputBytes
+    if (!isGzip) {
+        imagePipelineLogger.d { "maybeGunzip passthrough: inputBytes=${inputBytes.size}" }
+        return inputBytes
+    }
     return runCatching {
         ByteArrayInputStream(inputBytes).use { byteInput ->
             GZIPInputStream(byteInput).use { gzipInput ->
                 gzipInput.readBytes()
             }
         }
-    }.getOrDefault(inputBytes)
+    }.getOrDefault(inputBytes).also { outputBytes ->
+        imagePipelineLogger.d {
+            "maybeGunzip result: inputBytes=${inputBytes.size} outputBytes=${outputBytes.size}"
+        }
+    }
 }
 
 private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap, imageId: String?): Boolean {
@@ -863,13 +892,17 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
         }
 
     val resolver = context.contentResolver
-    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: run {
+        imagePipelineLogger.w { "saveBitmapToGallery failed: insert returned null imageId=$imageId" }
+        return false
+    }
     return runCatching {
         resolver.openOutputStream(uri)?.use { output ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)
         } ?: false
     }
         .getOrElse {
+            imagePipelineLogger.e(it) { "saveBitmapToGallery exception: imageId=$imageId uri=$uri" }
             resolver.delete(uri, null, null)
             false
         }
@@ -881,6 +914,9 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
             if (!success) {
                 resolver.delete(uri, null, null)
             }
+            imagePipelineLogger.d {
+                "saveBitmapToGallery result: success=$success imageId=$imageId uri=$uri width=${bitmap.width} height=${bitmap.height}"
+            }
         }
 }
 
@@ -891,6 +927,7 @@ private fun buildChunkedPayloadPackets(
 ): List<ByteArray> {
     val payloadBytes = maybeGzip(jpegBytes, zipCompressionEnabled)
     if (payloadBytes.isEmpty()) {
+        imagePipelineLogger.w { "buildChunkedPayloadPackets produced empty payload: jpegBytes=${jpegBytes.size}" }
         return emptyList()
     }
     val totalParts = ((payloadBytes.size + chunkPayloadBytes - 1) / chunkPayloadBytes).coerceAtLeast(1)
@@ -911,16 +948,27 @@ private fun buildChunkedPayloadPackets(
         offset = nextOffset
         partIndex++
     }
+    imagePipelineLogger.d {
+        "buildChunkedPayloadPackets result: payloadId=$payloadId jpegBytes=${jpegBytes.size} payloadBytes=${payloadBytes.size} chunkPayloadBytes=$chunkPayloadBytes chunks=${chunks.size}"
+    }
     return chunks
 }
 
 private fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bitmap? {
-    if (chunks.isEmpty()) return null
+    if (chunks.isEmpty()) {
+        imagePipelineLogger.d { "decodeBitmapFromOutgoingChunkedPayloads skipped: no chunks" }
+        return null
+    }
     val decodedChunks =
         chunks.mapNotNull { chunkBytes ->
             runCatching { ChunkedPayload.ADAPTER.decode(chunkBytes.toByteString()) }.getOrNull()
         }
-    if (decodedChunks.size != chunks.size) return null
+    if (decodedChunks.size != chunks.size) {
+        imagePipelineLogger.w {
+            "decodeBitmapFromOutgoingChunkedPayloads failed: decodedChunks=${decodedChunks.size} expected=${chunks.size}"
+        }
+        return null
+    }
 
     val firstChunk = decodedChunks.firstOrNull() ?: return null
     val payloadId = firstChunk.payload_id
@@ -929,6 +977,9 @@ private fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bi
 
     decodedChunks.forEach { chunk ->
         if (chunk.payload_id != payloadId || chunk.chunk_count != totalParts) {
+            imagePipelineLogger.w {
+                "decodeBitmapFromOutgoingChunkedPayloads inconsistent chunk metadata: payloadId=${chunk.payload_id} expectedPayloadId=$payloadId chunkCount=${chunk.chunk_count} expectedChunkCount=$totalParts"
+            }
             return null
         }
         partsByIndex[chunk.chunk_index] = chunk.payload_chunk.toByteArray()
@@ -942,10 +993,15 @@ private fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bi
             }
             .toByteArray()
     if (payload.isEmpty()) {
+        imagePipelineLogger.w { "decodeBitmapFromOutgoingChunkedPayloads failed: reassembled payload empty" }
         return null
     }
     val imageBytes = maybeGunzip(payload)
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).also { bitmap ->
+        imagePipelineLogger.d {
+            "decodeBitmapFromOutgoingChunkedPayloads result: decoded=${bitmap != null} chunks=${chunks.size} payloadBytes=${payload.size} imageBytes=${imageBytes.size}"
+        }
+    }
 }
 
 @Composable
@@ -1160,11 +1216,18 @@ private fun ImageAdjustmentDialog(
     fun buildChunksForQuality(bitmap: Bitmap, quality: Int): List<ByteArray> {
         val outputStream = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(0, 100), outputStream)
-        return buildChunkedPayloadPackets(jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true)
+        return buildChunkedPayloadPackets(jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true).also { builtChunks ->
+            imagePipelineLogger.d {
+                "buildChunksForQuality result: quality=$quality chunks=${builtChunks.size} maxChunkBytes=${builtChunks.maxOfOrNull { it.size } ?: 0}"
+            }
+        }
     }
 
     LaunchedEffect(imageUri, selectedSize) {
         val requestId = ++scaledBitmapRequestId
+        imagePipelineLogger.d {
+            "imageImport decode start: requestId=$requestId uri=$imageUri selectedSize=$selectedSize"
+        }
         try {
             val computedScaledBitmap =
                 withContext(Dispatchers.IO) {
@@ -1180,8 +1243,14 @@ private fun ImageAdjustmentDialog(
                 }
             if (requestId == scaledBitmapRequestId) {
                 scaledBitmap = computedScaledBitmap
+                imagePipelineLogger.d {
+                    "imageImport decode finished: requestId=$requestId hasBitmap=${computedScaledBitmap != null} width=${computedScaledBitmap?.width ?: 0} height=${computedScaledBitmap?.height ?: 0}"
+                }
+            } else {
+                imagePipelineLogger.d { "imageImport decode stale result dropped: requestId=$requestId latest=$scaledBitmapRequestId" }
             }
         } catch (cancellation: CancellationException) {
+            imagePipelineLogger.d { "imageImport decode cancelled: requestId=$requestId" }
             throw cancellation
         }
     }
@@ -1196,6 +1265,9 @@ private fun ImageAdjustmentDialog(
     ) {
         val bitmap = scaledBitmap ?: return@LaunchedEffect
         val requestId = ++previewComputationRequestId
+        imagePipelineLogger.d {
+            "previewComputation start: requestId=$requestId width=${bitmap.width} height=${bitmap.height} selectedSize=$selectedSize duty=$boundedDutyCyclePercent maxSeconds=$selectedMaxTransmissionTimeSeconds"
+        }
         try {
             data class PreviewComputationResult(
                 val minSeconds: Float,
@@ -1280,6 +1352,9 @@ private fun ImageAdjustmentDialog(
                 }
 
             if (requestId != previewComputationRequestId) {
+                imagePipelineLogger.d {
+                    "previewComputation stale result dropped: requestId=$requestId latest=$previewComputationRequestId"
+                }
                 return@LaunchedEffect
             }
 
@@ -1293,7 +1368,11 @@ private fun ImageAdjustmentDialog(
             selectedJpegQuality = result.bestQuality
             chunks = result.bestChunks
             previewBitmap = result.decodedPreview
+            imagePipelineLogger.d {
+                "previewComputation applied: requestId=$requestId quality=${result.bestQuality} chunks=${result.bestChunks.size} decodedPreview=${result.decodedPreview != null} minSeconds=${result.minSeconds} maxSeconds=${result.maxSeconds}"
+            }
         } catch (cancellation: CancellationException) {
+            imagePipelineLogger.d { "previewComputation cancelled: requestId=$requestId" }
             throw cancellation
         }
     }
@@ -1487,6 +1566,7 @@ private fun MessageInput(
 
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         selectedImageUri = uri
+        imagePipelineLogger.d { "imagePicker result: selected=${uri != null} uri=$uri" }
     }
 
     OutlinedTextField(
@@ -1567,6 +1647,7 @@ private fun MessageInput(
                 text = { Text(stringResource(Res.string.attach_image)) },
                 onClick = {
                     showAttachmentMenu = false
+                    imagePipelineLogger.d { "imagePicker launch requested" }
                     imagePickerLauncher.launch("image/*")
                 }
             )
@@ -1591,6 +1672,9 @@ private fun MessageInput(
                     it.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, maxDutyCyclePercentForRegion(loraConfig.region))
             },
             onSend = { chunks, delayMillis ->
+                imagePipelineLogger.d {
+                    "imageSend confirmed: chunks=${chunks.size} delayMillis=$delayMillis totalChunkBytes=${chunks.sumOf { it.size }} contactKey=$contactKey"
+                }
                 selectedImageUri = null
                 if (viewModel != null) {
                     viewModel.sendChunkedPayloadChunks(
@@ -1600,7 +1684,10 @@ private fun MessageInput(
                     )
                 }
             },
-            onCancel = { selectedImageUri = null }
+            onCancel = {
+                imagePipelineLogger.d { "imageSend cancelled in adjustment dialog uri=$uri" }
+                selectedImageUri = null
+            }
         )
     }
 }

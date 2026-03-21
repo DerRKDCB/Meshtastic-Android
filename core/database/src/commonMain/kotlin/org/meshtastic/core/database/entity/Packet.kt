@@ -22,6 +22,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import androidx.room.Relation
+import co.touchlab.kermit.Logger
 import okio.ByteString
 import org.meshtastic.core.common.util.nowMillis
 import org.meshtastic.core.model.DataPacket
@@ -47,6 +48,12 @@ data class PacketEntity(
             } else {
                 null
             }
+        if (data.dataType == PortNum.PRIVATE_APP.value) {
+            Logger.d {
+                "PacketEntity.toMessage PRIVATE_APP: uuid=$uuid packetId=$packetId from=${data.from} payloadBytes=${data.bytes?.size ?: 0} " +
+                    "payloadId=${privateChunkPayload?.payload_id} chunkIndex=${privateChunkPayload?.chunk_index} chunkCount=${privateChunkPayload?.chunk_count}"
+            }
+        }
         Message(
             uuid = uuid,
             receivedTime = received_time,
