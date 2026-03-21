@@ -75,9 +75,7 @@ import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.common.util.HomoglyphCharacterStringTransformer
 import org.meshtastic.core.model.Channel
@@ -113,9 +111,8 @@ import org.meshtastic.feature.messaging.image.DecodeImageDialog
 import org.meshtastic.feature.messaging.image.DecodeImageError
 import org.meshtastic.feature.messaging.image.DecodeImageUiState
 import org.meshtastic.feature.messaging.image.ImageAdjustmentDialog
-import org.meshtastic.feature.messaging.image.decodeBitmapFromChunks
+import org.meshtastic.feature.messaging.image.decodeImageFromTimelineMessage
 import org.meshtastic.feature.messaging.image.maxDutyCyclePercentForRegion
-import org.meshtastic.feature.messaging.image.scanImageChunks
 import java.nio.charset.StandardCharsets
 
 private const val ROUNDED_CORNER_PERCENT = 100
@@ -284,106 +281,13 @@ fun MessageScreen(
                         selectedMessageIds.value = emptySet()
                     }
                     is MessageScreenEvent.DecodeImage -> {
-                        val seedChunk = parseImageChunk(event.message.text)
-                        if (seedChunk == null) {
-                            decodeImageUiState =
-                                DecodeImageUiState(visible = true, isSearching = false, error = DecodeImageError.DecodeFailed)
-                            return
-                        }
-
-                        decodeImageUiState =
-                            DecodeImageUiState(
-                                visible = true,
-                                imageId = seedChunk.imageId,
-                                foundChunks = 1,
-                                totalChunks = seedChunk.totalParts,
-                                isSearching = true,
-                            )
-
                         coroutineScope.launch {
-                            runCatching {
-                                val allMessages = viewModel.getMessagesFlow(contactKey, limit = null).first()
-                                val scanResult =
-                                    scanImageChunks(
-                                        seedChunk = seedChunk,
-                                        messages = allMessages,
-                                        onProgress = { found, total ->
-                                            decodeImageUiState =
-                                                decodeImageUiState.copy(
-                                                    foundChunks = found,
-                                                    totalChunks = total,
-                                                    isSearching = true,
-                                                    error = null,
-                                                )
-                                        },
-                                    )
-
-                                val foundChunks = scanResult.partsByIndex.size
-                                val totalChunks = scanResult.totalParts
-                                val missingCount = (1..totalChunks).count { index -> !scanResult.partsByIndex.containsKey(index) }
-
-                                if (foundChunks == 0) {
-                                    decodeImageUiState =
-                                        decodeImageUiState.copy(
-                                            isSearching = false,
-                                            decodedBitmap = null,
-                                            error = DecodeImageError.NoMatchingChunks,
-                                            foundChunks = foundChunks,
-                                            totalChunks = totalChunks,
-                                        )
-                                    return@runCatching
-                                }
-
-                                if (missingCount > 0) {
-                                    decodeImageUiState =
-                                        decodeImageUiState.copy(
-                                            isSearching = false,
-                                            decodedBitmap = null,
-                                            error = DecodeImageError.MissingChunks(foundChunks, totalChunks),
-                                            foundChunks = foundChunks,
-                                            totalChunks = totalChunks,
-                                        )
-                                    return@runCatching
-                                }
-
-                                val decodedBitmap =
-                                    withContext(Dispatchers.Default) {
-                                        decodeBitmapFromChunks(
-                                            partsByIndex = scanResult.partsByIndex,
-                                            totalParts = scanResult.totalParts,
-                                        )
-                                    }
-
-                                decodeImageUiState =
-                                    when {
-                                        decodedBitmap != null -> {
-                                            decodeImageUiState.copy(
-                                                isSearching = false,
-                                                decodedBitmap = decodedBitmap,
-                                                error = null,
-                                                foundChunks = foundChunks,
-                                                totalChunks = totalChunks,
-                                            )
-                                        }
-
-                                        else -> {
-                                            decodeImageUiState.copy(
-                                                isSearching = false,
-                                                decodedBitmap = null,
-                                                error = DecodeImageError.DecodeFailed,
-                                                foundChunks = foundChunks,
-                                                totalChunks = totalChunks,
-                                            )
-                                        }
-                                    }
-                            }.onFailure {
-                                decodeImageUiState =
-                                    decodeImageUiState.copy(
-                                        isSearching = false,
-                                        decodedBitmap = null,
-                                        error = DecodeImageError.DecodeFailed,
-                                    )
-                            }
+                            decodeImageFromTimelineMessage(
+                                messageText = event.message.text,
+                                loadMessages = { viewModel.getMessagesFlow(contactKey, limit = null).first() },
+                                initialState = decodeImageUiState,
+                                setState = { decodeImageUiState = it },
+                            )
                         }
                     }
                 }
