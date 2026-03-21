@@ -18,6 +18,12 @@ package org.meshtastic.feature.messaging.image
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import co.touchlab.kermit.Logger
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -161,6 +167,112 @@ private fun decodeBitmapBestEffort(payloadBytes: ByteArray): Bitmap? {
         "decodeBitmapBestEffort failed: payloadBytes=${payloadBytes.size} candidates=${candidates.size}"
     }
     return null
+}
+
+internal data class LoadedTimelineImageRows(
+    val imageByMessageUuid: Map<Long, TimelinePrivateImageMessageData>,
+    val hiddenChunkMessageUuids: Set<Long>,
+)
+
+internal data class TimelineImageRowsResult(
+    val rows: LoadedTimelineImageRows,
+    val onInlineImageClick: (payloadId: Int, senderNum: Int) -> Unit,
+)
+
+/**
+ * Returns chunk UUIDs that should be deleted when the user deletes [message].
+ * For image messages every chunk sharing the same payloadId is included; for regular
+ * messages only the single UUID is returned.
+ */
+internal fun deleteImageUuidsFor(message: Message, imageChunkMessages: List<Message>): List<Long> {
+    val payloadId = message.privatePayloadId ?: return listOf(message.uuid)
+    val senderNum = message.node.num
+    val payloadMessages = imageChunkMessages.filter { it.privatePayloadId == payloadId && it.node.num == senderNum }
+    return payloadMessages.map { it.uuid }.ifEmpty { listOf(message.uuid) }
+}
+
+/**
+ * Builds and memoises the image-row mapping for the timeline.
+ *
+ * Returns a [LoadedTimelineImageRows] that maps each representative chunk UUID to its
+ * decoded image data and the set of sibling chunk UUIDs that should be hidden.
+ *
+ * The representative UUID per payload is kept stable across recompositions so list keys
+ * do not churn when new chunks arrive.
+ */
+@Composable
+internal fun rememberTimelineImageRows(
+    contactKey: String,
+    displayedMessages: List<Message>,
+    imageChunkMessages: List<Message>,
+): TimelineImageRowsResult {
+    val privateImageDecodeCache = remember(contactKey) { mutableMapOf<String, PrivateImageDecodeCacheEntry>() }
+    var expandedImageSelection by remember(contactKey) { mutableStateOf<ExpandedTimelineImageSelection?>(null) }
+
+    val privateImageRenderState by
+        remember(imageChunkMessages) {
+            derivedStateOf {
+                buildPrivateImageRenderState(imageChunkMessages, privateImageDecodeCache)
+            }
+        }
+
+    val representativeRowUuidByPayload = remember(contactKey) { mutableMapOf<TimelineImagePayloadKey, Long>() }
+
+    val loadedImageRows by
+        remember(displayedMessages, privateImageRenderState) {
+            derivedStateOf {
+                val imageByMessageUuid = mutableMapOf<Long, TimelinePrivateImageMessageData>()
+                val hiddenChunkMessageUuids = mutableSetOf<Long>()
+                val activePayloadKeys = mutableSetOf<TimelineImagePayloadKey>()
+
+                displayedMessages
+                    .filter { it.privatePayloadId != null && it.privateChunkIndex != null }
+                    .groupBy {
+                        TimelineImagePayloadKey(
+                            senderNum = it.node.num,
+                            payloadId = it.privatePayloadId ?: -1,
+                        )
+                    }
+                    .forEach { (payloadKey, group) ->
+                        activePayloadKeys += payloadKey
+                        val imageData = privateImageRenderState.imageByPayloadKey[payloadKey] ?: return@forEach
+                        val representative =
+                            representativeRowUuidByPayload[payloadKey]
+                                ?.let { stableUuid -> group.firstOrNull { it.uuid == stableUuid } }
+                                ?: group.minByOrNull { it.privateChunkIndex ?: Int.MAX_VALUE }
+                                ?: return@forEach
+                        representativeRowUuidByPayload[payloadKey] = representative.uuid
+                        imageByMessageUuid[representative.uuid] = imageData
+                        group.filter { it.uuid != representative.uuid }.forEach { hiddenChunkMessageUuids += it.uuid }
+                    }
+
+                representativeRowUuidByPayload.keys.retainAll(activePayloadKeys)
+
+                LoadedTimelineImageRows(
+                    imageByMessageUuid = imageByMessageUuid,
+                    hiddenChunkMessageUuids = hiddenChunkMessageUuids,
+                )
+            }
+        }
+
+    TimelineExpandedImagePreviewHost(
+        selection = expandedImageSelection,
+        privateImageRenderState = privateImageRenderState,
+        onDismiss = { expandedImageSelection = null },
+    )
+
+    val onInlineImageClick: (Int, Int) -> Unit = remember(contactKey) {
+        { payloadId, senderNum ->
+            selectExpandedTimelineImage(payloadId = payloadId, senderNum = senderNum) { selection ->
+                expandedImageSelection = selection
+            }
+        }
+    }
+
+    return TimelineImageRowsResult(
+        rows = loadedImageRows,
+        onInlineImageClick = onInlineImageClick,
+    )
 }
 
 internal fun buildPrivateImageRenderState(

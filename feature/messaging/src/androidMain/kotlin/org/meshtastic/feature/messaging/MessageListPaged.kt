@@ -64,13 +64,10 @@ import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
-import org.meshtastic.feature.messaging.image.ExpandedTimelineImageSelection
-import org.meshtastic.feature.messaging.image.PrivateImageDecodeCacheEntry
-import org.meshtastic.feature.messaging.image.TimelineImagePayloadKey
+import org.meshtastic.feature.messaging.image.LoadedTimelineImageRows
 import org.meshtastic.feature.messaging.image.TimelinePrivateImageMessageData
-import org.meshtastic.feature.messaging.image.TimelineExpandedImagePreviewHost
-import org.meshtastic.feature.messaging.image.buildPrivateImageRenderState
-import org.meshtastic.feature.messaging.image.selectExpandedTimelineImage
+import org.meshtastic.feature.messaging.image.deleteImageUuidsFor
+import org.meshtastic.feature.messaging.image.rememberTimelineImageRows
 import org.meshtastic.feature.messaging.component.MessageItem
 import org.meshtastic.feature.messaging.component.MessageStatusDialog
 import org.meshtastic.feature.messaging.component.ReactionDialog
@@ -108,21 +105,6 @@ private fun MutableState<Set<Long>>.toggle(uuid: Long) {
             value + uuid
         }
 }
-
-private fun MessageListPagedState.deleteUuidsFor(message: Message): List<Long> {
-    val payloadId = message.privatePayloadId ?: return listOf(message.uuid)
-    val senderNum = message.node.num
-    val payloadMessages =
-        imageChunkMessages.filter { chunk ->
-            chunk.privatePayloadId == payloadId && chunk.node.num == senderNum
-        }
-    return payloadMessages.map { it.uuid }.ifEmpty { listOf(message.uuid) }
-}
-
-private data class LoadedTimelineImageRows(
-    val imageByMessageUuid: Map<Long, TimelinePrivateImageMessageData>,
-    val hiddenChunkMessageUuids: Set<Long>,
-)
 
 @Composable
 internal fun MessageListPaged(
@@ -220,78 +202,22 @@ private fun MessageListPagedContent(
     modifier: Modifier = Modifier,
     quickEmojis: List<String>,
 ) {
-    val privateImageDecodeCache = remember { mutableMapOf<String, PrivateImageDecodeCacheEntry>() }
-    var expandedImageSelection by remember { mutableStateOf<ExpandedTimelineImageSelection?>(null) }
-
     val currentLoadedMessages by
         remember(state.messages.itemCount) {
             derivedStateOf { state.messages.itemSnapshotList.items.filterNotNull() }
         }
     val displayedMessages = currentLoadedMessages
 
-    val privateImageRenderState by
-        remember(state.imageChunkMessages) {
-            derivedStateOf {
-                buildPrivateImageRenderState(state.imageChunkMessages, privateImageDecodeCache)
-            }
-        }
-
-    val representativeRowUuidByPayload = remember(state.contactKey) { mutableMapOf<TimelineImagePayloadKey, Long>() }
-
-    val loadedImageRows by
-        remember(displayedMessages, privateImageRenderState) {
-            derivedStateOf {
-                val imageByMessageUuid = mutableMapOf<Long, TimelinePrivateImageMessageData>()
-                val hiddenChunkMessageUuids = mutableSetOf<Long>()
-                val activePayloadKeys = mutableSetOf<TimelineImagePayloadKey>()
-
-                displayedMessages
-                    .filter { it.privatePayloadId != null && it.privateChunkIndex != null }
-                    .groupBy {
-                        TimelineImagePayloadKey(
-                            senderNum = it.node.num,
-                            payloadId = it.privatePayloadId ?: -1,
-                        )
-                    }
-                    .forEach { (payloadKey, group) ->
-                        activePayloadKeys += payloadKey
-                        val imageData = privateImageRenderState.imageByPayloadKey[payloadKey] ?: return@forEach
-                        val representative =
-                            representativeRowUuidByPayload[payloadKey]
-                                ?.let { stableUuid -> group.firstOrNull { it.uuid == stableUuid } }
-                                ?: group.minByOrNull { it.privateChunkIndex ?: Int.MAX_VALUE }
-                                ?: return@forEach
-                        representativeRowUuidByPayload[payloadKey] = representative.uuid
-                        imageByMessageUuid[representative.uuid] = imageData
-                        group.filter { it.uuid != representative.uuid }.forEach { hiddenChunkMessageUuids += it.uuid }
-                    }
-
-                representativeRowUuidByPayload.keys.retainAll(activePayloadKeys)
-
-                LoadedTimelineImageRows(
-                    imageByMessageUuid = imageByMessageUuid,
-                    hiddenChunkMessageUuids = hiddenChunkMessageUuids,
-                )
-            }
-        }
-
-    TimelineExpandedImagePreviewHost(
-        selection = expandedImageSelection,
-        privateImageRenderState = privateImageRenderState,
-        onDismiss = { expandedImageSelection = null },
-    )
-
-    val onInlineImageClick: (Int, Int) -> Unit =
-        remember {
-            { payloadId, senderNum ->
-                selectExpandedTimelineImage(
-                    payloadId = payloadId,
-                    senderNum = senderNum,
-                ) { selection ->
-                    expandedImageSelection = selection
-                }
-            }
-        }
+    val loadedImageRows: LoadedTimelineImageRows
+    val onInlineImageClick: (Int, Int) -> Unit
+    rememberTimelineImageRows(
+        contactKey = state.contactKey,
+        displayedMessages = displayedMessages,
+        imageChunkMessages = state.imageChunkMessages,
+    ).also {
+        loadedImageRows = it.rows
+        onInlineImageClick = it.onInlineImageClick
+    }
 
     // Calculate unread divider position using snapshot to avoid side-effects and improve performance
     // Optimized: Use full snapshot index to correctly match LazyColumn index range
@@ -462,7 +388,7 @@ private fun RenderPagedChatMessageRow(
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         },
         onSelect = { state.selectedIds.toggle(message.uuid) },
-        onDelete = { handlers.onDeleteMessages(state.deleteUuidsFor(message)) },
+        onDelete = { handlers.onDeleteMessages(deleteImageUuidsFor(message, state.imageChunkMessages)) },
         onClickChip = handlers.onClickChip,
         onStatusClick = { onShowStatusDialog(message) },
         onReply = { handlers.onReply(message) },
