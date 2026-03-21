@@ -16,29 +16,19 @@
  */
 package org.meshtastic.feature.messaging
 
-import android.content.ContentValues
 import android.graphics.Bitmap
-import android.os.Build
-import android.provider.MediaStore
 import co.touchlab.kermit.Logger
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -51,15 +41,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.LoadState
@@ -72,20 +60,16 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.resources.Res
-import org.meshtastic.core.resources.close
-import org.meshtastic.core.resources.decode_image_save_failed
-import org.meshtastic.core.resources.decode_image_saved
 import org.meshtastic.core.resources.image_timeline_chunk_progress
-import org.meshtastic.core.resources.save
 import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
 import org.meshtastic.feature.messaging.image.PrivateImageDecodeCacheEntry
 import org.meshtastic.feature.messaging.image.TimelinePrivateImageMessageData
+import org.meshtastic.feature.messaging.image.ExpandedTimelineImageDialog
 import org.meshtastic.feature.messaging.image.buildPrivateImageRenderState
 import org.meshtastic.feature.messaging.component.MessageItem
 import org.meshtastic.feature.messaging.component.MessageStatusDialog
@@ -135,7 +119,6 @@ internal fun MessageListPaged(
     quickEmojis: List<String> = emptyList(),
 ) {
     val haptics = LocalHapticFeedback.current
-    val context = LocalContext.current
     val inSelectionMode by remember { derivedStateOf { state.selectedIds.value.isNotEmpty() } }
 
     // Optimization: Pre-calculate map for O(1) lookup in list items to avoid O(N) linear search during scrolling.
@@ -174,56 +157,9 @@ internal fun MessageListPaged(
 
     val coroutineScope = rememberCoroutineScope()
     var expandedImage by remember { mutableStateOf<Bitmap?>(null) }
-    var saveResultMessageRes by remember { mutableStateOf<org.jetbrains.compose.resources.StringResource?>(null) }
 
     expandedImage?.let { bitmap ->
-        Dialog(onDismissRequest = { expandedImage = null }) {
-            Surface(modifier = Modifier.fillMaxWidth().fillMaxHeight(0.92f).padding(16.dp)) {
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Expanded image",
-                        modifier = Modifier.fillMaxWidth().weight(1f, fill = true),
-                    )
-
-                    saveResultMessageRes?.let { messageRes ->
-                        Text(text = stringResource(messageRes))
-                    }
-
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.align(Alignment.CenterEnd),
-                        ) {
-                            Button(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        val success = withContext(Dispatchers.IO) { saveBitmapToGallery(context, bitmap) }
-                                        timelineImageLogger.d {
-                                            "expanded image save requested: success=$success width=${bitmap.width} height=${bitmap.height}"
-                                        }
-                                        saveResultMessageRes =
-                                            if (success) {
-                                                Res.string.decode_image_saved
-                                            } else {
-                                                Res.string.decode_image_save_failed
-                                            }
-                                    }
-                                },
-                            ) {
-                                Text(stringResource(Res.string.save))
-                            }
-                            TextButton(onClick = { expandedImage = null }) {
-                                Text(stringResource(Res.string.close))
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        ExpandedTimelineImageDialog(bitmap = bitmap, onDismiss = { expandedImage = null })
     }
 
     // Disable auto-scroll when any dialog is open to prevent list jumping
@@ -253,7 +189,6 @@ internal fun MessageListPaged(
         onInlineImageClick = { bitmap ->
             timelineImageLogger.d { "inline image click: width=${bitmap.width} height=${bitmap.height}" }
             expandedImage = bitmap
-            saveResultMessageRes = null
         },
         modifier = modifier,
         quickEmojis = quickEmojis,
@@ -496,48 +431,6 @@ private fun RenderPagedChatMessageRow(
         hasSameNext = hasSameNext,
         quickEmojis = quickEmojis,
     )
-}
-
-private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap): Boolean {
-    val now = System.currentTimeMillis()
-    val displayName = "meshtastic_$now.jpg"
-    val values =
-        ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Meshtastic")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
-        }
-
-    val resolver = context.contentResolver
-    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: run {
-        timelineImageLogger.w { "timeline save failed: insert returned null" }
-        return false
-    }
-    return runCatching {
-        resolver.openOutputStream(uri)?.use { output ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)
-        } ?: false
-    }
-        .getOrElse {
-            timelineImageLogger.e(it) { "timeline save exception uri=$uri" }
-            resolver.delete(uri, null, null)
-            false
-        }
-        .also { success ->
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val pendingValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
-                resolver.update(uri, pendingValues, null, null)
-            }
-            if (!success) {
-                resolver.delete(uri, null, null)
-            }
-            timelineImageLogger.d {
-                "timeline save result: success=$success uri=$uri width=${bitmap.width} height=${bitmap.height}"
-            }
-        }
 }
 
 @Suppress("CyclomaticComplexMethod")
