@@ -19,6 +19,7 @@ package org.meshtastic.feature.messaging.image
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.text.format.Formatter
 import android.text.format.DateUtils
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -69,6 +70,7 @@ import org.meshtastic.core.resources.image_adjustment_result_line_primary
 import org.meshtastic.core.resources.image_adjustment_result_line_secondary
 import org.meshtastic.core.resources.image_adjustment_results
 import org.meshtastic.core.resources.image_adjustment_select_max_side_length
+import org.meshtastic.core.resources.compression_size_summary
 import org.meshtastic.core.resources.send
 import org.meshtastic.proto.Config
 import kotlin.math.roundToInt
@@ -93,6 +95,8 @@ internal fun ImageAdjustmentDialog(
     var selectedJpegQuality by remember { mutableStateOf(0) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chunks by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
+    var rawPayloadSizeText by remember { mutableStateOf<String?>(null) }
+    var gzipPayloadSizeText by remember { mutableStateOf<String?>(null) }
     var scaledBitmapRequestId by remember(imageUri) { mutableStateOf(0) }
     var previewComputationRequestId by remember(imageUri) { mutableStateOf(0) }
     val regionMaxDutyCyclePercent = maxDutyCyclePercentForRegion(loraConfig.region)
@@ -142,13 +146,27 @@ internal fun ImageAdjustmentDialog(
     val selectedMaxTransmissionTimeText =
         DateUtils.formatElapsedTime(boundedSelectedMaxTransmissionTimeSeconds.roundToInt().toLong())
 
-    fun buildChunksForQuality(bitmap: Bitmap, quality: Int): List<ByteArray> {
+    data class BuiltPayloadChunks(
+        val rawBytesSize: Int,
+        val gzipBytesSize: Int,
+        val chunks: List<ByteArray>,
+    )
+
+    fun buildChunksForQuality(bitmap: Bitmap, quality: Int): BuiltPayloadChunks {
         val outputStream = java.io.ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(0, 100), outputStream)
+        val jpegBytes = outputStream.toByteArray()
+        val payloadBytes = buildImagePayloadBytes(jpegBytes)
         return buildChunkedPayloadPackets(
-            payloadBytes = buildImagePayloadBytes(outputStream.toByteArray()),
+            payloadBytes = payloadBytes,
             zipCompressionEnabled = true,
-        )
+        ).let { chunks ->
+            BuiltPayloadChunks(
+                rawBytesSize = jpegBytes.size,
+                gzipBytesSize = gzipPayloadBytes(payloadBytes).size,
+                chunks = chunks,
+            )
+        }
     }
 
     LaunchedEffect(imageUri, selectedSize) {
@@ -190,7 +208,7 @@ internal fun ImageAdjustmentDialog(
                 val maxSeconds: Float,
                 val snappedSelectedSeconds: Float,
                 val bestQuality: Int,
-                val bestChunks: List<ByteArray>,
+                val bestPayload: BuiltPayloadChunks,
                 val decodedPreview: Bitmap?,
             )
 
@@ -199,9 +217,9 @@ internal fun ImageAdjustmentDialog(
                     val chunksAtQuality0 = buildChunksForQuality(bitmap, 0)
                     val chunksAtQuality90 = buildChunksForQuality(bitmap, MAX_AUTO_IMAGE_JPEG_QUALITY)
                     val transmissionSecondsAt0 =
-                        estimateTransmissionMillisForChunks(chunksAtQuality0, boundedDutyCyclePercent, loraConfig) / 1000f
+                        estimateTransmissionMillisForChunks(chunksAtQuality0.chunks, boundedDutyCyclePercent, loraConfig) / 1000f
                     val transmissionSecondsAt90 =
-                        estimateTransmissionMillisForChunks(chunksAtQuality90, boundedDutyCyclePercent, loraConfig) / 1000f
+                        estimateTransmissionMillisForChunks(chunksAtQuality90.chunks, boundedDutyCyclePercent, loraConfig) / 1000f
                     val minSeconds = minOf(transmissionSecondsAt0, transmissionSecondsAt90)
                     val maxSeconds = maxOf(transmissionSecondsAt0, transmissionSecondsAt90)
 
@@ -240,7 +258,7 @@ internal fun ImageAdjustmentDialog(
                         }
 
                     var bestQuality = 0
-                    var bestChunks = chunksAtQuality0
+                    var bestPayload = chunksAtQuality0
                     for (quality in MAX_AUTO_IMAGE_JPEG_QUALITY downTo 0) {
                         val candidateChunks =
                             when (quality) {
@@ -249,10 +267,10 @@ internal fun ImageAdjustmentDialog(
                                 else -> buildChunksForQuality(bitmap, quality)
                             }
                         val candidateSeconds =
-                            estimateTransmissionMillisForChunks(candidateChunks, boundedDutyCyclePercent, loraConfig) / 1000f
+                            estimateTransmissionMillisForChunks(candidateChunks.chunks, boundedDutyCyclePercent, loraConfig) / 1000f
                         if (candidateSeconds <= targetSeconds) {
                             bestQuality = quality
-                            bestChunks = candidateChunks
+                            bestPayload = candidateChunks
                             break
                         }
                     }
@@ -262,8 +280,8 @@ internal fun ImageAdjustmentDialog(
                         maxSeconds = maxSeconds,
                         snappedSelectedSeconds = snappedSelectedSeconds,
                         bestQuality = bestQuality,
-                        bestChunks = bestChunks,
-                        decodedPreview = decodeBitmapFromOutgoingChunkedPayloads(bestChunks),
+                        bestPayload = bestPayload,
+                        decodedPreview = decodeBitmapFromOutgoingChunkedPayloads(bestPayload.chunks),
                     )
                 }
 
@@ -279,7 +297,9 @@ internal fun ImageAdjustmentDialog(
             }
 
             selectedJpegQuality = result.bestQuality
-            chunks = result.bestChunks
+            chunks = result.bestPayload.chunks
+            rawPayloadSizeText = Formatter.formatShortFileSize(context, result.bestPayload.rawBytesSize.toLong())
+            gzipPayloadSizeText = Formatter.formatShortFileSize(context, result.bestPayload.gzipBytesSize.toLong())
             previewBitmap = result.decodedPreview
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -379,6 +399,14 @@ internal fun ImageAdjustmentDialog(
                 Spacer(modifier = Modifier.size(8.dp))
 
                 Text(stringResource(Res.string.image_adjustment_results))
+                rawPayloadSizeText?.let { rawSizeText ->
+                    gzipPayloadSizeText?.let { gzipSizeText ->
+                        Text(
+                            stringResource(Res.string.compression_size_summary, rawSizeText, gzipSizeText),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
                 Text(
                     stringResource(
                         Res.string.image_adjustment_result_line_primary,

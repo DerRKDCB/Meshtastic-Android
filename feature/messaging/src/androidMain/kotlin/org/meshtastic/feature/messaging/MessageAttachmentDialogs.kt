@@ -71,7 +71,7 @@ import org.meshtastic.core.resources.file_adjustment_load_failed
 import org.meshtastic.core.resources.file_adjustment_preview
 import org.meshtastic.core.resources.file_adjustment_result_line_primary
 import org.meshtastic.core.resources.file_adjustment_results
-import org.meshtastic.core.resources.file_adjustment_summary
+import org.meshtastic.core.resources.compression_size_summary
 import org.meshtastic.core.resources.image_adjustment_duty_cycle
 import org.meshtastic.core.resources.image_adjustment_duty_cycle_summary
 import org.meshtastic.core.resources.image_adjustment_result_line_secondary
@@ -87,10 +87,28 @@ import org.meshtastic.feature.messaging.image.estimateTransmissionMillisForChunk
 import org.meshtastic.feature.messaging.image.formatDutyCyclePercent
 import org.meshtastic.feature.messaging.image.interChunkDelayMillisForDutyCycle
 import org.meshtastic.feature.messaging.image.maxDutyCyclePercentForRegion
+import org.meshtastic.feature.messaging.image.gzipPayloadBytes
 import org.meshtastic.core.ui.util.rememberOpenMap
 import org.meshtastic.proto.Config
 import org.meshtastic.proto.Position
 import java.util.Locale
+
+private const val MAX_FILE_SIZE_BYTES = 10L * 1024L * 1024L
+private const val MAX_COMPRESSED_FILE_SIZE_BYTES = 1L * 1024L * 1024L
+
+private enum class FileSizeLimitState {
+    None,
+    Raw,
+    Compressed,
+}
+
+private data class LoadedFilePayload(
+    val fileName: String,
+    val fileSizeBytes: Long,
+    val gzipSizeBytes: Long,
+    val chunks: List<ByteArray>,
+    val sizeLimitState: FileSizeLimitState,
+)
 
 @Suppress("LongMethod")
 @Composable
@@ -106,6 +124,8 @@ internal fun FileAdjustmentDialog(
     }
     var fileName by remember(fileUri) { mutableStateOf<String?>(null) }
     var fileSizeText by remember(fileUri) { mutableStateOf<String?>(null) }
+    var fileGzipSizeText by remember(fileUri) { mutableStateOf<String?>(null) }
+    var fileSizeLimitState by remember(fileUri) { mutableStateOf(FileSizeLimitState.None) }
     var chunks by remember(fileUri) { mutableStateOf<List<ByteArray>>(emptyList()) }
     var loadError by remember(fileUri) { mutableStateOf(false) }
 
@@ -113,20 +133,46 @@ internal fun FileAdjustmentDialog(
         val loaded =
             withContext(Dispatchers.IO) {
                 val resolvedFileName = context.resolveDisplayName(uri = fileUri) ?: fileUri.lastPathSegment ?: "attachment"
-                val fileBytes = context.readUriBytes(uri = fileUri)
-                if (fileBytes == null) return@withContext null
+                val fileBytes = context.readUriBytes(uri = fileUri) ?: return@withContext null
+                if (fileBytes.size.toLong() > MAX_FILE_SIZE_BYTES) {
+                    return@withContext LoadedFilePayload(
+                        fileName = resolvedFileName,
+                        fileSizeBytes = fileBytes.size.toLong(),
+                        gzipSizeBytes = -1L,
+                        chunks = emptyList(),
+                        sizeLimitState = FileSizeLimitState.Raw,
+                    )
+                }
                 val payloadBytes = encodePrivateAppPayload(PrivateAppPayloadType.File, fileBytes, fileName = resolvedFileName)
-                Triple(resolvedFileName, fileBytes, buildChunkedPayloadPackets(payloadBytes = payloadBytes))
+                val gzipSizeBytes = gzipPayloadBytes(payloadBytes).size
+                if (gzipSizeBytes.toLong() > MAX_COMPRESSED_FILE_SIZE_BYTES) {
+                    return@withContext LoadedFilePayload(
+                        fileName = resolvedFileName,
+                        fileSizeBytes = fileBytes.size.toLong(),
+                        gzipSizeBytes = gzipSizeBytes.toLong(),
+                        chunks = emptyList(),
+                        sizeLimitState = FileSizeLimitState.Compressed,
+                    )
+                }
+                val loadedChunks = buildChunkedPayloadPackets(payloadBytes = payloadBytes)
+                LoadedFilePayload(
+                    fileName = resolvedFileName,
+                    fileSizeBytes = fileBytes.size.toLong(),
+                    gzipSizeBytes = gzipSizeBytes.toLong(),
+                    chunks = loadedChunks,
+                    sizeLimitState = FileSizeLimitState.None,
+                )
             }
         if (loaded == null) {
             loadError = true
             return@LaunchedEffect
         }
 
-        val (resolvedFileName, fileBytes, loadedChunks) = loaded
-        fileName = resolvedFileName
-        fileSizeText = Formatter.formatShortFileSize(context, fileBytes.size.toLong())
-        chunks = loadedChunks
+        fileName = loaded.fileName
+        fileSizeText = Formatter.formatShortFileSize(context, loaded.fileSizeBytes)
+        fileGzipSizeText = if (loaded.gzipSizeBytes >= 0L) Formatter.formatShortFileSize(context, loaded.gzipSizeBytes) else null
+        fileSizeLimitState = loaded.sizeLimitState
+        chunks = loaded.chunks
     }
 
     val regionMaxDutyCyclePercent = maxDutyCyclePercentForRegion(loraConfig.region)
@@ -171,9 +217,32 @@ internal fun FileAdjustmentDialog(
                     loadError -> Text(text = stringResource(Res.string.file_adjustment_load_failed))
                     fileName != null && fileSizeText != null -> {
                         Text(
-                            text = stringResource(Res.string.file_adjustment_summary, fileName!!, fileSizeText!!),
+                            text = fileName!!,
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        fileGzipSizeText?.let { gzipSizeText ->
+                            Text(
+                                text = stringResource(Res.string.compression_size_summary, fileSizeText!!, gzipSizeText),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        when (fileSizeLimitState) {
+                            FileSizeLimitState.Raw -> {
+                                Text(
+                                    text = "${fileName!!} is ${fileSizeText!!} and exceeds the 10 MB limit before compression.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                            FileSizeLimitState.Compressed -> {
+                                Text(
+                                    text = "File must be 1 MB or smaller after compression.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                            FileSizeLimitState.None -> Unit
+                        }
                     }
                 }
 
@@ -219,11 +288,11 @@ internal fun FileAdjustmentDialog(
                     Spacer(modifier = Modifier.size(8.dp))
                     Button(
                         onClick = {
-                            if (chunks.isNotEmpty()) {
+                            if (chunks.isNotEmpty() && fileSizeLimitState == FileSizeLimitState.None) {
                                 onSend(chunks, selectedChunkDelayMillis)
                             }
                         },
-                        enabled = chunks.isNotEmpty(),
+                        enabled = chunks.isNotEmpty() && fileSizeLimitState == FileSizeLimitState.None,
                     ) {
                         Text(stringResource(Res.string.send))
                     }

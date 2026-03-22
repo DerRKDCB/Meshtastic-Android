@@ -199,6 +199,7 @@
     <string name="file_adjustment_preview">File preview</string>
     <string name="file_adjustment_load_failed">Unable to load file</string>
     <string name="file_adjustment_summary">Selected: %1$s • Size: %2$s</string>
+    <string name="compression_size_summary">Before gzip: %1$s • After gzip: %2$s</string>
     <string name="file_adjustment_results">Results</string>
     <string name="file_adjustment_result_line_primary">Chunks %1$d • TX %2$s</string>
     <string name="file_attachment_actions">File attachment</string>

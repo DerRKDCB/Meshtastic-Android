@@ -45,6 +45,9 @@ private fun maybeGzip(inputBytes: ByteArray, isEnabled: Boolean): ByteArray {
     }.getOrDefault(inputBytes)
 }
 
+internal fun gzipPayloadBytes(payloadBytes: ByteArray, zipCompressionEnabled: Boolean = true): ByteArray =
+    maybeGzip(payloadBytes, zipCompressionEnabled)
+
 private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
     if (inputBytes.size < 2) return inputBytes
     val isGzip = inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
@@ -65,7 +68,7 @@ internal fun buildChunkedPayloadPackets(
     zipCompressionEnabled: Boolean = true,
     chunkPayloadBytes: Int = IMAGE_CHUNK_PAYLOAD_BYTES,
 ): List<ByteArray> {
-    val zippedPayloadBytes = maybeGzip(payloadBytes, zipCompressionEnabled)
+    val zippedPayloadBytes = gzipPayloadBytes(payloadBytes, zipCompressionEnabled)
     if (zippedPayloadBytes.isEmpty()) {
         return emptyList()
     }
