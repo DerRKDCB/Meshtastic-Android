@@ -22,6 +22,9 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.text.format.DateUtils
 import android.text.format.Formatter
+import android.view.MotionEvent
+import android.widget.ImageView
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,6 +37,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -53,6 +57,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -84,7 +89,6 @@ import org.meshtastic.core.resources.latitude
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.position
 import org.meshtastic.core.resources.position_map_picker_hint
-import org.meshtastic.core.resources.position_open_in_map
 import org.meshtastic.core.resources.position_use_current_location
 import org.meshtastic.core.resources.longitude
 import org.meshtastic.core.model.PrivateAppPayloadType
@@ -97,14 +101,11 @@ import org.meshtastic.feature.messaging.image.formatDutyCyclePercent
 import org.meshtastic.feature.messaging.image.interChunkDelayMillisForDutyCycle
 import org.meshtastic.feature.messaging.image.maxDutyCyclePercentForRegion
 import org.meshtastic.feature.messaging.image.gzipPayloadBytes
-import org.meshtastic.core.ui.util.rememberOpenMap
 import org.meshtastic.proto.Config
 import org.meshtastic.proto.Position
 import org.osmdroid.config.Configuration
-import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import java.util.Locale
@@ -325,10 +326,18 @@ internal fun PositionShareDialog(
     onSend: (ByteArray) -> Unit,
     onCancel: () -> Unit,
 ) {
-    val openMap = rememberOpenMap()
-    val positionTitle = stringResource(Res.string.position)
     var latitudeState by rememberSaveable { mutableStateOf(currentLocation?.latitude?.toString().orEmpty()) }
     var longitudeState by rememberSaveable { mutableStateOf(currentLocation?.longitude?.toString().orEmpty()) }
+    var hasSeededInitialLocation by remember { mutableStateOf(false) }
+
+    LaunchedEffect(currentLocation) {
+        if (!hasSeededInitialLocation && currentLocation != null) {
+            latitudeState = currentLocation.latitude.toString()
+            longitudeState = currentLocation.longitude.toString()
+            hasSeededInitialLocation = true
+        }
+    }
+
     val parsedLatitude = latitudeState.toDoubleOrNull()
     val parsedLongitude = longitudeState.toDoubleOrNull()
     val selectedLatitude = parsedLatitude ?: currentLocation?.latitude ?: 0.0
@@ -354,19 +363,14 @@ internal fun PositionShareDialog(
                 )
                 OutlinedTextField(
                     value = latitudeState,
-                    onValueChange = { latitudeState = it },
-                    label = { Text(stringResource(Res.string.latitude)) },
+                    onValueChange = {
+                        latitudeState = it
+                    },
                 )
                 OutlinedTextField(
                     value = longitudeState,
-                    onValueChange = { longitudeState = it },
-                    label = { Text(stringResource(Res.string.longitude)) },
-                )
-                Text(
-                    text = if (parsedLatitude != null && parsedLongitude != null) {
-                        String.format(Locale.US, "%.6f, %.6f", parsedLatitude, parsedLongitude)
-                    } else {
-                        stringResource(Res.string.position_map_picker_hint)
+                    onValueChange = {
+                        longitudeState = it
                     },
                 )
                 TextButton(
@@ -374,20 +378,11 @@ internal fun PositionShareDialog(
                         currentLocation?.let { location ->
                             latitudeState = location.latitude.toString()
                             longitudeState = location.longitude.toString()
+                            hasSeededInitialLocation = true
                         }
                     },
                 ) {
                     Text(stringResource(Res.string.position_use_current_location))
-                }
-                TextButton(
-                    onClick = {
-                        if (parsedLatitude != null && parsedLongitude != null) {
-                            openMap(parsedLatitude, parsedLongitude, positionTitle)
-                        }
-                    },
-                    enabled = parsedLatitude != null && parsedLongitude != null,
-                ) {
-                    Text(stringResource(Res.string.position_open_in_map))
                 }
             }
         },
@@ -431,66 +426,74 @@ private fun PositionPickerMap(
             Configuration.getInstance().userAgentValue = context.packageName
             setTileSource(TileSourceFactory.MAPNIK)
             setMultiTouchControls(true)
+            setFlingEnabled(false)
             minZoomLevel = 1.0
             controller.setZoom(13.0)
         }
     }
-    val marker = remember(mapView) {
-        Marker(mapView).apply {
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-        }
-    }
-    val mapEventsOverlay = remember(mapView) {
-        MapEventsOverlay(object : MapEventsReceiver {
-            override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
-                latestOnCoordinatesSelected(p.latitude, p.longitude)
-                return true
-            }
+    val pinDrawable = remember(mapView) { Marker(mapView).icon }
 
-            override fun longPressHelper(p: GeoPoint): Boolean {
-                latestOnCoordinatesSelected(p.latitude, p.longitude)
-                return true
-            }
-        })
+    fun updateSelectedPosition() {
+        val center = mapView.projection.currentCenter
+        latestOnCoordinatesSelected(center.latitude, center.longitude)
     }
 
     LaunchedEffect(latitude, longitude) {
         val geoPoint = GeoPoint(latitude, longitude)
         mapView.controller.setCenter(geoPoint)
-        marker.position = geoPoint
+        latestOnCoordinatesSelected(geoPoint.latitude, geoPoint.longitude)
         mapView.invalidate()
     }
 
     DisposableEffect(mapView) {
-        if (mapView.overlays.none { it === mapEventsOverlay }) {
-            mapView.overlays.add(0, mapEventsOverlay)
-        }
-        if (mapView.overlays.none { it === marker }) {
-            mapView.overlays.add(marker)
-        }
         onDispose {
-            mapView.overlays.remove(mapEventsOverlay)
-            mapView.overlays.remove(marker)
             mapView.onPause()
             mapView.onDetach()
         }
     }
 
-    AndroidView(
-        factory = {
-            mapView.apply {
-                controller.setCenter(GeoPoint(latitude, longitude))
-                marker.position = GeoPoint(latitude, longitude)
-            }
-        },
+    Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(220.dp),
-        update = {
-            marker.position = GeoPoint(latitude, longitude)
-            it.invalidate()
-        },
-    )
+            .height(440.dp)
+            .clipToBounds(),
+    ) {
+        AndroidView(
+            factory = {
+                mapView.apply {
+                    controller.setCenter(GeoPoint(latitude, longitude))
+                    latestOnCoordinatesSelected(latitude, longitude)
+                    setOnTouchListener { _, event ->
+                        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                            updateSelectedPosition()
+                        }
+                        false
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            update = {
+                it.invalidate()
+            },
+        )
+
+        AndroidView(
+            factory = {
+                ImageView(it).apply {
+                    setImageDrawable(pinDrawable)
+                    adjustViewBounds = true
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(48.dp),
+            update = { imageView ->
+                imageView.setImageDrawable(pinDrawable)
+                pinDrawable?.let { imageView.translationY = -it.intrinsicHeight / 2f }
+            },
+        )
+    }
 }
 
 @Composable
