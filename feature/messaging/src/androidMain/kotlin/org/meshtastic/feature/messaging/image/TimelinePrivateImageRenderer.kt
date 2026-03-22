@@ -29,6 +29,8 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.GZIPInputStream
 import java.util.zip.Inflater
+import org.meshtastic.core.model.PrivateAppPayloadType
+import org.meshtastic.core.model.decodePrivateAppPayload
 import org.meshtastic.core.model.Message
 import org.meshtastic.proto.PortNum
 
@@ -50,6 +52,8 @@ internal data class TimelinePrivateImageMessageData(
     val bitmap: Bitmap?,
     val availableChunks: Int,
     val totalChunks: Int,
+    val attachmentLabel: String? = null,
+    val decodedPayload: org.meshtastic.core.model.DecodedPrivateAppPayload? = null,
 )
 
 private val timelineImageLogger = Logger.withTag("MsgTimelineImage")
@@ -172,6 +176,8 @@ private fun decodeBitmapBestEffort(payloadBytes: ByteArray): Bitmap? {
 internal data class LoadedTimelineImageRows(
     val imageByMessageUuid: Map<Long, TimelinePrivateImageMessageData>,
     val hiddenChunkMessageUuids: Set<Long>,
+    val attachmentLabelByMessageUuid: Map<Long, String>,
+    val attachmentPayloadByMessageUuid: Map<Long, org.meshtastic.core.model.DecodedPrivateAppPayload>,
 )
 
 internal data class TimelineImageRowsResult(
@@ -223,6 +229,8 @@ internal fun rememberTimelineImageRows(
             derivedStateOf {
                 val imageByMessageUuid = mutableMapOf<Long, TimelinePrivateImageMessageData>()
                 val hiddenChunkMessageUuids = mutableSetOf<Long>()
+                val attachmentLabelByMessageUuid = mutableMapOf<Long, String>()
+                val attachmentPayloadByMessageUuid = mutableMapOf<Long, org.meshtastic.core.model.DecodedPrivateAppPayload>()
                 val activePayloadKeys = mutableSetOf<TimelineImagePayloadKey>()
 
                 displayedMessages
@@ -243,6 +251,8 @@ internal fun rememberTimelineImageRows(
                                 ?: return@forEach
                         representativeRowUuidByPayload[payloadKey] = representative.uuid
                         imageByMessageUuid[representative.uuid] = imageData
+                        imageData.attachmentLabel?.let { attachmentLabelByMessageUuid[representative.uuid] = it }
+                        imageData.decodedPayload?.let { attachmentPayloadByMessageUuid[representative.uuid] = it }
                         group.filter { it.uuid != representative.uuid }.forEach { hiddenChunkMessageUuids += it.uuid }
                     }
 
@@ -251,6 +261,8 @@ internal fun rememberTimelineImageRows(
                 LoadedTimelineImageRows(
                     imageByMessageUuid = imageByMessageUuid,
                     hiddenChunkMessageUuids = hiddenChunkMessageUuids,
+                    attachmentLabelByMessageUuid = attachmentLabelByMessageUuid,
+                    attachmentPayloadByMessageUuid = attachmentPayloadByMessageUuid,
                 )
             }
         }
@@ -323,6 +335,21 @@ internal fun buildPrivateImageRenderState(
         val senderNum = group.firstOrNull()?.message?.node?.num ?: 0
         val cacheKey = "$senderNum:$payloadId"
         val cachedEntry = decodeCache[cacheKey]
+        val payloadBytes =
+            ByteArrayOutputStream().use { output ->
+                chunksByIndex.keys.sorted()
+                    .mapNotNull { chunkIndex -> chunksByIndex[chunkIndex]?.bytes }
+                    .forEach { chunkBytes -> output.write(chunkBytes) }
+                output.toByteArray()
+            }
+        val decompressedPayload = gunzipStrict(payloadBytes) ?: gunzipBestEffortPartial(payloadBytes) ?: payloadBytes
+        val decodedPayload = decodePrivateAppPayload(decompressedPayload)
+        val liveImageBytes =
+            when {
+                decodedPayload?.type == PrivateAppPayloadType.Image -> decodedPayload.payload
+                decompressedPayload.firstOrNull() == PrivateAppPayloadType.Image.code -> decompressedPayload.drop(1).toByteArray()
+                else -> null
+            }
 
         val shouldRetryDecode = cachedEntry == null || availableChunks > cachedEntry.attemptedChunkCount
         val bitmap =
@@ -330,21 +357,20 @@ internal fun buildPrivateImageRenderState(
                 timelineImageLogger.d {
                     "decode attempt: cacheKey=$cacheKey payloadId=$payloadId availableChunks=$availableChunks expectedCount=$expectedCount duplicates=$duplicateChunkCount cachedAttempted=${cachedEntry?.attemptedChunkCount ?: 0}"
                 }
-                val payloadBytes =
-                    ByteArrayOutputStream().use { output ->
-                        chunksByIndex.keys.sorted()
-                            .mapNotNull { chunkIndex -> chunksByIndex[chunkIndex]?.bytes }
-                            .forEach { chunkBytes -> output.write(chunkBytes) }
-                        output.toByteArray()
+                val decodedBitmap =
+                    if (liveImageBytes != null) {
+                        decodeBitmapBestEffort(liveImageBytes)
+                    } else {
+                        null
                     }
-                decodeBitmapBestEffort(payloadBytes).also { decodedBitmap ->
+                decodedBitmap.also { bitmapResult ->
                     decodeCache[cacheKey] =
                         PrivateImageDecodeCacheEntry(
-                            bitmap = decodedBitmap,
+                            bitmap = bitmapResult,
                             attemptedChunkCount = availableChunks,
                         )
                     timelineImageLogger.d {
-                        "decode stored: cacheKey=$cacheKey decoded=${decodedBitmap != null} payloadBytes=${payloadBytes.size} availableChunks=$availableChunks expectedCount=$expectedCount duplicates=$duplicateChunkCount"
+                        "decode stored: cacheKey=$cacheKey decoded=${bitmapResult != null} payloadBytes=${payloadBytes.size} availableChunks=$availableChunks expectedCount=$expectedCount duplicates=$duplicateChunkCount type=${decodedPayload?.type}"
                     }
                 }
             } else {
@@ -353,11 +379,31 @@ internal fun buildPrivateImageRenderState(
                 }
                 cachedEntry.bitmap
             }
+        val attachmentLabel =
+            when (decodedPayload?.type) {
+                PrivateAppPayloadType.File -> {
+                    val fileName = decodedPayload.fileName
+                    val fileSizeText = decodedPayload.fileSize?.let { formatByteCount(it) }
+                    when {
+                        fileName != null && fileSizeText != null -> "File: $fileName • $fileSizeText"
+                        fileName != null -> "File: $fileName"
+                        fileSizeText != null -> "File • $fileSizeText"
+                        else -> "File"
+                    }
+                }
+                PrivateAppPayloadType.Position -> decodedPayload.position?.let {
+                    "Position: ${it.latitude_i ?: 0}, ${it.longitude_i ?: 0}"
+                } ?: "Position"
+                PrivateAppPayloadType.Image -> "Image"
+                null -> null
+            }
         imageByPayloadKey[TimelineImagePayloadKey(senderNum = senderNum, payloadId = payloadId)] =
             TimelinePrivateImageMessageData(
                 bitmap = bitmap,
                 availableChunks = availableChunks,
                 totalChunks = expectedCount,
+                attachmentLabel = attachmentLabel,
+                decodedPayload = decodedPayload,
             )
     }
 
@@ -366,4 +412,19 @@ internal fun buildPrivateImageRenderState(
     }
 
     return TimelinePrivateImageRenderState(imageByPayloadKey)
+}
+
+private fun formatByteCount(bytes: Long): String {
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    var value = bytes.toDouble()
+    var unitIndex = 0
+    while (value >= 1024 && unitIndex < units.lastIndex) {
+        value /= 1024
+        unitIndex++
+    }
+    return if (unitIndex == 0) {
+        "${value.toLong()} ${units[unitIndex]}"
+    } else {
+        String.format("%.1f %s", value, units[unitIndex])
+    }
 }

@@ -47,6 +47,12 @@ data class PacketEntity(
             } else {
                 null
             }
+        val privatePayloadBytes =
+            if (data.dataType == PortNum.PRIVATE_APP.value && privateChunkPayload == null) {
+                data.bytes?.toByteArray()
+            } else {
+                null
+            }
         Message(
             uuid = uuid,
             receivedTime = received_time,
@@ -73,6 +79,7 @@ data class PacketEntity(
             privateChunkIndex = privateChunkPayload?.chunk_index,
             privateChunkCount = privateChunkPayload?.chunk_count,
             privateChunkBytes = privateChunkPayload?.payload_chunk?.toByteArray(),
+            privatePayloadBytes = privatePayloadBytes,
         )
     }
 }

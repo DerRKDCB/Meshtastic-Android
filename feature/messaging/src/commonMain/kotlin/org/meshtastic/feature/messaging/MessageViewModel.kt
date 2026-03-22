@@ -26,6 +26,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -44,6 +45,8 @@ import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.service.ServiceAction
 import org.meshtastic.core.repository.CustomEmojiPrefs
 import org.meshtastic.core.repository.HomoglyphPrefs
+import org.meshtastic.core.repository.Location
+import org.meshtastic.core.repository.LocationRepository
 import org.meshtastic.core.repository.MeshServiceNotifications
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.PacketRepository
@@ -66,6 +69,7 @@ class MessageViewModel(
     private val uiPrefs: UiPrefs,
     private val customEmojiPrefs: CustomEmojiPrefs,
     private val homoglyphEncodingPrefs: HomoglyphPrefs,
+    private val locationRepository: LocationRepository,
     private val meshServiceNotifications: MeshServiceNotifications,
     private val sendMessageUseCase: SendMessageUseCase,
 ) : ViewModel() {
@@ -157,6 +161,12 @@ class MessageViewModel(
             .flatMapLatest { packetRepository.getImageChunksFrom(it, ::getNode) }
             .stateInWhileSubscribed(emptyList())
 
+    val currentLocation: StateFlow<Location?> =
+        locationRepository
+            .getLocations()
+            .map { it }
+            .stateInWhileSubscribed(initialValue = null)
+
     init {
         val contactKey = savedStateHandle.get<String>("contactKey")
         if (contactKey != null) {
@@ -231,6 +241,10 @@ class MessageViewModel(
      */
     fun sendMessage(str: String, contactKey: String = "0${DataPacket.ID_BROADCAST}", replyId: Int? = null) {
         viewModelScope.launch { sendMessageUseCase.invoke(str, contactKey, replyId) }
+    }
+
+    fun sendPrivateAppPayload(payload: ByteArray, contactKey: String = "0${DataPacket.ID_BROADCAST}") {
+        viewModelScope.launch { sendMessageUseCase.sendPrivateAppPayload(payload, contactKey) }
     }
 
     fun sendChunkedPayloadChunks(

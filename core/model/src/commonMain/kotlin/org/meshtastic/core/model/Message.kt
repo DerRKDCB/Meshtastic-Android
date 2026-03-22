@@ -98,6 +98,7 @@ data class Message(
     val privateChunkIndex: Int? = null,
     val privateChunkCount: Int? = null,
     val privateChunkBytes: ByteArray? = null,
+    val privatePayloadBytes: ByteArray? = null,
 ) {
     fun getStatusStringRes(): Pair<StringResource, StringResource> {
         val title = if (routingError > 0) Res.string.error else Res.string.message_delivery_status

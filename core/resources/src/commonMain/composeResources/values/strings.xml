@@ -194,6 +194,17 @@
     <string name="send">Send</string>
     <string name="attachment">Attachment</string>
     <string name="attach_image">Image</string>
+    <string name="attach_file">File</string>
+    <string name="position">Position</string>
+    <string name="file_adjustment_preview">File preview</string>
+    <string name="file_adjustment_load_failed">Unable to load file</string>
+    <string name="file_adjustment_summary">Selected: %1$s • Size: %2$s</string>
+    <string name="file_adjustment_results">Results</string>
+    <string name="file_adjustment_result_line_primary">Chunks %1$d • TX %2$s</string>
+    <string name="file_attachment_actions">File attachment</string>
+    <string name="file_attachment_save_to_phone">Save to phone</string>
+    <string name="file_attachment_open_with_app">Open with an app</string>
+    <string name="file_attachment_receiving">Still receiving file data</string>
     <string name="image_adjustment_preview">Image preview</string>
     <string name="image_adjustment_select_max_side_length">Select maximum resolution:</string>
     <string name="image_adjustment_max_transmission_time">Max transmission time</string>
@@ -520,7 +531,6 @@
     <string name="user">User</string>
     <string name="channels">Channels</string>
     <string name="device">Device</string>
-    <string name="position">Position</string>
     <string name="power">Power</string>
     <string name="network">Network</string>
     <string name="display">Display</string>

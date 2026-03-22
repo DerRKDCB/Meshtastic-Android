@@ -145,7 +145,10 @@ internal fun ImageAdjustmentDialog(
     fun buildChunksForQuality(bitmap: Bitmap, quality: Int): List<ByteArray> {
         val outputStream = java.io.ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(0, 100), outputStream)
-        return buildChunkedPayloadPackets(jpegBytes = outputStream.toByteArray(), zipCompressionEnabled = true)
+        return buildChunkedPayloadPackets(
+            payloadBytes = buildImagePayloadBytes(outputStream.toByteArray()),
+            zipCompressionEnabled = true,
+        )
     }
 
     LaunchedEffect(imageUri, selectedSize) {

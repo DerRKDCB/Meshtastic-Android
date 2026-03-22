@@ -20,6 +20,7 @@ package org.meshtastic.feature.messaging
 
 import android.content.ClipData
 import android.graphics.Bitmap
+import android.location.Location
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.focusable
@@ -47,7 +48,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
@@ -83,16 +83,19 @@ import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.util.getChannel
 import org.meshtastic.proto.Config
 import org.meshtastic.core.resources.Res
-import org.meshtastic.core.resources.message_input_label
+import org.meshtastic.core.resources.attach_file
+import org.meshtastic.core.resources.attach_image
 import org.meshtastic.core.resources.cancel
+import org.meshtastic.core.resources.message_input_label
+import org.meshtastic.core.resources.position
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.type_a_message
 import org.meshtastic.core.resources.unknown_channel
 import org.meshtastic.core.resources.attachment
-import org.meshtastic.core.resources.attach_image
 import org.meshtastic.core.ui.component.SharedContactDialog
 import org.meshtastic.core.ui.component.smartScrollToIndex
 import org.meshtastic.core.ui.theme.AppTheme
+import org.meshtastic.core.ui.util.rememberOpenMap
 import org.meshtastic.feature.messaging.component.ActionModeTopBar
 import org.meshtastic.feature.messaging.component.DeleteMessageDialog
 import org.meshtastic.feature.messaging.component.MESSAGE_CHARACTER_LIMIT_BYTES
@@ -144,6 +147,7 @@ fun MessageScreen(
     val imageChunkMessages by viewModel.imageChunkMessages.collectAsStateWithLifecycle()
     val contactSettings by viewModel.contactSettings.collectAsStateWithLifecycle(initialValue = emptyMap())
     val homoglyphEncodingEnabled by viewModel.homoglyphEncodingEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val currentLocation by viewModel.currentLocation.collectAsStateWithLifecycle(initialValue = null)
 
     // UI State managed within this Composable
     var replyingToPacketId by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -374,6 +378,7 @@ fun MessageScreen(
                     isSendingChunks = isSendingChunks,
                     isHomoglyphEncodingEnabled = homoglyphEncodingEnabled,
                     loraConfig = channels.lora_config ?: Channel.default.loraConfig,
+                    currentLocation = currentLocation,
                     textFieldState = messageInputState,
                     onSendMessage = {
                         val messageText = messageInputState.text.toString().trim { it.isWhitespace() }
@@ -463,6 +468,7 @@ private fun MessageInput(
     isSendingChunks: Boolean = false,
     isHomoglyphEncodingEnabled: Boolean,
     loraConfig: Config.LoRaConfig,
+    currentLocation: Location? = null,
     textFieldState: TextFieldState,
     modifier: Modifier = Modifier,
     maxByteSize: Int = MESSAGE_CHARACTER_LIMIT_BYTES,
@@ -490,6 +496,7 @@ private fun MessageInput(
     val canSend = !isOverLimit && currentText.isNotEmpty() && isEnabled
 
     var showAttachmentMenu by remember { mutableStateOf(false) }
+    var showPositionDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(isEnabled, isSendingChunks) {
         if (!isEnabled && !isSendingChunks) {
@@ -498,6 +505,7 @@ private fun MessageInput(
     }
 
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
 
     var selectedSize by remember { mutableStateOf(32) }
     var selectedMaxTransmissionTimeSeconds by remember { mutableStateOf(0f) }
@@ -510,6 +518,10 @@ private fun MessageInput(
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         selectedImageUri = uri
     }
+    val filePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        selectedFileUri = uri
+    }
+    val openMap = rememberOpenMap()
 
     OutlinedTextField(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
@@ -592,7 +604,51 @@ private fun MessageInput(
                     imagePickerLauncher.launch("image/*")
                 }
             )
+            DropdownMenuItem(
+                text = { Text(stringResource(Res.string.position)) },
+                onClick = {
+                    showAttachmentMenu = false
+                    showPositionDialog = true
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(Res.string.attach_file)) },
+                onClick = {
+                    showAttachmentMenu = false
+                    filePickerLauncher.launch("*/*")
+                }
+            )
         }
+    }
+
+    selectedFileUri?.let { uri ->
+        FileAdjustmentDialog(
+            fileUri = uri,
+            loraConfig = loraConfig,
+            onSend = { chunks, delayMillis ->
+                selectedFileUri = null
+                if (viewModel != null) {
+                    viewModel.sendChunkedPayloadChunks(
+                        chunks = chunks,
+                        contactKey = contactKey,
+                        delayMillis = delayMillis,
+                    )
+                }
+            },
+            onCancel = { selectedFileUri = null },
+        )
+    }
+
+    if (showPositionDialog) {
+        PositionShareDialog(
+            currentLocation = currentLocation,
+            onSend = { payloadBytes ->
+                if (viewModel != null) {
+                    viewModel.sendPrivateAppPayload(payload = payloadBytes, contactKey = contactKey)
+                }
+            },
+            onCancel = { showPositionDialog = false },
+        )
     }
 
     selectedImageUri?.let { uri ->

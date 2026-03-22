@@ -45,10 +45,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.compose.LazyPagingItems
+import android.text.format.Formatter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
@@ -56,19 +58,27 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.resources.Res
+import org.meshtastic.core.resources.position
 import org.meshtastic.core.resources.image_timeline_chunk_progress
+import org.meshtastic.core.database.entity.NodeEntity.Companion.degD
 import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
+import org.meshtastic.core.model.DecodedPrivateAppPayload
+import org.meshtastic.core.model.PrivateAppPayloadType
+import org.meshtastic.core.model.decodePrivateAppPayload
 import org.meshtastic.feature.messaging.image.LoadedTimelineImageRows
 import org.meshtastic.feature.messaging.image.TimelinePrivateImageMessageData
 import org.meshtastic.feature.messaging.image.deleteImageUuidsFor
 import org.meshtastic.feature.messaging.image.rememberTimelineImageRows
+import org.meshtastic.feature.messaging.image.savePrivateFileAttachmentToDevice
+import org.meshtastic.feature.messaging.image.openPrivateFileAttachmentWithApp
 import org.meshtastic.feature.messaging.component.MessageItem
 import org.meshtastic.feature.messaging.component.MessageStatusDialog
 import org.meshtastic.feature.messaging.component.ReactionDialog
 import org.meshtastic.feature.messaging.component.UnreadMessagesDivider
+import org.meshtastic.core.ui.util.rememberOpenMap
 
 internal data class MessageListHandlers(
     val onUnreadChanged: (Long, Long) -> Unit,
@@ -112,8 +122,6 @@ internal fun MessageListPaged(
 ) {
     val haptics = LocalHapticFeedback.current
     val inSelectionMode by remember { derivedStateOf { state.selectedIds.value.isNotEmpty() } }
-
-    // Optimization: Pre-calculate map for O(1) lookup in list items to avoid O(N) linear search during scrolling.
     val nodeMap = remember(state.nodes) { state.nodes.associateBy { it.num } }
 
     var showStatusDialog by remember { mutableStateOf<Message?>(null) }
@@ -258,6 +266,8 @@ private fun MessageListPagedContent(
                             RenderPagedChatMessageRow(
                                 message = message,
                                 inlineImageData = loadedImageRows.imageByMessageUuid[message.uuid],
+                                inlineAttachmentLabel = loadedImageRows.attachmentLabelByMessageUuid[message.uuid],
+                                inlineAttachmentPayload = loadedImageRows.attachmentPayloadByMessageUuid[message.uuid],
                                 state = state,
                                 nodeMap = nodeMap,
                                 handlers = handlers,
@@ -279,6 +289,8 @@ private fun MessageListPagedContent(
                         RenderPagedChatMessageRow(
                             message = message,
                             inlineImageData = loadedImageRows.imageByMessageUuid[message.uuid],
+                            inlineAttachmentLabel = loadedImageRows.attachmentLabelByMessageUuid[message.uuid],
+                            inlineAttachmentPayload = loadedImageRows.attachmentPayloadByMessageUuid[message.uuid],
                             state = state,
                             nodeMap = nodeMap,
                             handlers = handlers,
@@ -309,6 +321,8 @@ private fun MessageListPagedContent(
 private fun RenderPagedChatMessageRow(
     message: Message,
     inlineImageData: TimelinePrivateImageMessageData?,
+    inlineAttachmentLabel: String?,
+    inlineAttachmentPayload: org.meshtastic.core.model.DecodedPrivateAppPayload?,
     state: MessageListPagedState,
     nodeMap: Map<Int, Node>,
     handlers: MessageListHandlers,
@@ -327,6 +341,10 @@ private fun RenderPagedChatMessageRow(
     quickEmojis: List<String>,
 ) {
     val ourNode = state.ourNode ?: return
+    val context = LocalContext.current
+    val openMap = rememberOpenMap()
+    val positionTitle = stringResource(Res.string.position)
+    var fileAttachmentDialog by remember { mutableStateOf<DecodedPrivateAppPayload?>(null) }
     val selected by
         remember(message.uuid, state.selectedIds.value) {
             derivedStateOf { state.selectedIds.value.contains(message.uuid) }
@@ -340,6 +358,27 @@ private fun RenderPagedChatMessageRow(
         inlineImageData?.let {
             stringResource(Res.string.image_timeline_chunk_progress, it.availableChunks, it.totalChunks)
         }
+    val directAttachmentPayload =
+        remember(message.uuid, message.privatePayloadBytes) {
+            message.privatePayloadBytes?.let { decodePrivateAppPayload(it) }
+        }
+    val resolvedAttachmentPayload = inlineAttachmentPayload ?: directAttachmentPayload
+    val resolvedAttachmentLabel =
+        inlineAttachmentLabel ?: directAttachmentPayload?.let { payload ->
+            when (payload.type) {
+                PrivateAppPayloadType.File -> {
+                    val fileSize = payload.fileSize ?: payload.payload.size.toLong()
+                    val sizeText = Formatter.formatShortFileSize(context, fileSize)
+                    payload.fileName?.let { "File: $it • $sizeText" } ?: "File • $sizeText"
+                }
+                PrivateAppPayloadType.Position -> payload.position?.let {
+                    val latitude = degD(it.latitude_i ?: 0)
+                    val longitude = degD(it.longitude_i ?: 0)
+                    String.format("%s: %.6f, %.6f", positionTitle, latitude, longitude)
+                } ?: positionTitle
+                PrivateAppPayloadType.Image -> "Image"
+            }
+        }
 
     MessageItem(
         modifier = modifier,
@@ -348,6 +387,8 @@ private fun RenderPagedChatMessageRow(
         message = message,
         inlineImageBitmap = inlineImageBitmap,
         inlineImageChunkInfoText = inlineImageChunkInfoText,
+        inlineAttachmentLabel = resolvedAttachmentLabel,
+        inlineAttachmentPayload = resolvedAttachmentPayload,
         selected = selected,
         inSelectionMode = inSelectionMode,
         onClick = { if (inSelectionMode) state.selectedIds.toggle(message.uuid) },
@@ -391,10 +432,46 @@ private fun RenderPagedChatMessageRow(
                 onInlineImageClick(payloadId, message.node.num)
             }
         },
+        onInlineAttachmentClick = {
+            resolvedAttachmentPayload?.let { payload ->
+                when (payload.type) {
+                    PrivateAppPayloadType.File -> fileAttachmentDialog = payload
+                    PrivateAppPayloadType.Position -> payload.position?.let {
+                        openMap(
+                            degD(it.latitude_i ?: 0),
+                            degD(it.longitude_i ?: 0),
+                            positionTitle,
+                        )
+                    }
+                    PrivateAppPayloadType.Image -> Unit
+                }
+            }
+        },
         hasSamePrev = hasSamePrev,
         hasSameNext = hasSameNext,
         quickEmojis = quickEmojis,
     )
+
+    fileAttachmentDialog?.let { payload ->
+        val fileName = payload.fileName ?: "attachment"
+        val fileSize = payload.fileSize
+        val fileSizeText = fileSize?.let { Formatter.formatShortFileSize(context, it) }
+        val isComplete = fileSize == null || payload.payload.size.toLong() >= fileSize
+        FileAttachmentActionDialog(
+            fileNameText = fileName,
+            fileSizeText = fileSizeText,
+            isComplete = isComplete,
+            onSaveToPhone = {
+                savePrivateFileAttachmentToDevice(context, payload)
+                fileAttachmentDialog = null
+            },
+            onOpenWithApp = {
+                openPrivateFileAttachmentWithApp(context, payload)
+                fileAttachmentDialog = null
+            },
+            onDismiss = { fileAttachmentDialog = null },
+        )
+    }
 }
 
 @Suppress("CyclomaticComplexMethod")

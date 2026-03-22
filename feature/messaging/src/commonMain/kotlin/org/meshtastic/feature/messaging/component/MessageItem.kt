@@ -67,6 +67,7 @@ import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
+import org.meshtastic.core.model.DecodedPrivateAppPayload
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.filter_message_label
 import org.meshtastic.core.resources.reply
@@ -91,6 +92,8 @@ fun MessageItem(
     message: Message,
     inlineImageBitmap: ImageBitmap? = null,
     inlineImageChunkInfoText: String? = null,
+    inlineAttachmentLabel: String? = null,
+    inlineAttachmentPayload: DecodedPrivateAppPayload? = null,
     selected: Boolean,
     inSelectionMode: Boolean = false,
     onReply: () -> Unit = {},
@@ -108,6 +111,7 @@ fun MessageItem(
     onNavigateToOriginalMessage: (Int) -> Unit = {},
     onStatusClick: () -> Unit = {},
     onInlineImageClick: () -> Unit = {},
+    onInlineAttachmentClick: () -> Unit = {},
     hasSamePrev: Boolean = false,
     hasSameNext: Boolean = false,
 ) = Column(
@@ -271,11 +275,23 @@ fun MessageItem(
             )
 
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
-                if (inlineImageBitmap == null && !isPrivateImageChunk) {
+                if (inlineImageBitmap == null && inlineAttachmentLabel == null && !isPrivateImageChunk) {
                     AutoLinkText(
                         text = message.text,
                         style = MaterialTheme.typography.bodyMedium,
                         color = cardColors.contentColor,
+                    )
+                }
+
+                inlineAttachmentLabel?.let { attachmentLabel ->
+                    Text(
+                        text = attachmentLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier =
+                            Modifier.padding(top = 4.dp).clickable(enabled = inlineAttachmentPayload != null) {
+                                onInlineAttachmentClick()
+                            },
                     )
                 }
 

@@ -24,6 +24,10 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import okio.ByteString.Companion.toByteString
 import org.meshtastic.proto.ChunkedPayload
+import org.meshtastic.core.model.DecodedPrivateAppPayload
+import org.meshtastic.core.model.PrivateAppPayloadType
+import org.meshtastic.core.model.decodePrivateAppPayload
+import org.meshtastic.core.model.encodePrivateAppPayload
 
 internal const val IMAGE_CHUNK_PAYLOAD_BYTES = 150
 internal const val MAX_AUTO_IMAGE_JPEG_QUALITY = 90
@@ -57,27 +61,27 @@ private fun maybeGunzip(inputBytes: ByteArray): ByteArray {
 }
 
 internal fun buildChunkedPayloadPackets(
-    jpegBytes: ByteArray,
+    payloadBytes: ByteArray,
     zipCompressionEnabled: Boolean = true,
     chunkPayloadBytes: Int = IMAGE_CHUNK_PAYLOAD_BYTES,
 ): List<ByteArray> {
-    val payloadBytes = maybeGzip(jpegBytes, zipCompressionEnabled)
-    if (payloadBytes.isEmpty()) {
+    val zippedPayloadBytes = maybeGzip(payloadBytes, zipCompressionEnabled)
+    if (zippedPayloadBytes.isEmpty()) {
         return emptyList()
     }
-    val totalParts = ((payloadBytes.size + chunkPayloadBytes - 1) / chunkPayloadBytes).coerceAtLeast(1)
+    val totalParts = ((zippedPayloadBytes.size + chunkPayloadBytes - 1) / chunkPayloadBytes).coerceAtLeast(1)
     val payloadId = kotlin.random.Random.nextInt(1, Int.MAX_VALUE)
     val chunks = mutableListOf<ByteArray>()
     var offset = 0
     var partIndex = 1
-    while (offset < payloadBytes.size) {
-        val nextOffset = (offset + chunkPayloadBytes).coerceAtMost(payloadBytes.size)
+    while (offset < zippedPayloadBytes.size) {
+        val nextOffset = (offset + chunkPayloadBytes).coerceAtMost(zippedPayloadBytes.size)
         val packet =
             ChunkedPayload(
                 payload_id = payloadId,
                 chunk_count = totalParts,
                 chunk_index = partIndex,
-                payload_chunk = payloadBytes.copyOfRange(offset, nextOffset).toByteString(),
+                payload_chunk = zippedPayloadBytes.copyOfRange(offset, nextOffset).toByteString(),
             )
         chunks += ChunkedPayload.ADAPTER.encode(packet)
         offset = nextOffset
@@ -86,7 +90,7 @@ internal fun buildChunkedPayloadPackets(
     return chunks
 }
 
-internal fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bitmap? {
+internal fun decodePrivateAppPayloadFromOutgoingChunkedPayloads(chunks: List<ByteArray>): DecodedPrivateAppPayload? {
     if (chunks.isEmpty()) {
         return null
     }
@@ -120,6 +124,24 @@ internal fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): B
     if (payload.isEmpty()) {
         return null
     }
-    val imageBytes = maybeGunzip(payload)
+    val decodedBytes = maybeGunzip(payload)
+    return decodePrivateAppPayload(decodedBytes)
+}
+
+internal fun decodeBitmapFromOutgoingChunkedPayloads(chunks: List<ByteArray>): Bitmap? {
+    val decodedPayload = decodePrivateAppPayloadFromOutgoingChunkedPayloads(chunks) ?: return null
+    if (decodedPayload.type != PrivateAppPayloadType.Image) {
+        return null
+    }
+    val imageBytes = decodedPayload.payload
     return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
 }
+
+internal fun buildImagePayloadBytes(imageBytes: ByteArray): ByteArray =
+    encodePrivateAppPayload(PrivateAppPayloadType.Image, imageBytes)
+
+internal fun buildPositionPayloadBytes(positionBytes: ByteArray): ByteArray =
+    encodePrivateAppPayload(PrivateAppPayloadType.Position, positionBytes)
+
+internal fun buildFilePayloadBytes(fileName: String, fileBytes: ByteArray): ByteArray =
+    encodePrivateAppPayload(PrivateAppPayloadType.File, fileBytes, fileName = fileName)
