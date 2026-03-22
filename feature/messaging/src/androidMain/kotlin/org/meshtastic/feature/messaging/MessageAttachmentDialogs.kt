@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -88,7 +89,6 @@ import org.meshtastic.core.resources.image_adjustment_milliseconds_value
 import org.meshtastic.core.resources.latitude
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.position
-import org.meshtastic.core.resources.position_map_picker_hint
 import org.meshtastic.core.resources.position_use_current_location
 import org.meshtastic.core.resources.longitude
 import org.meshtastic.core.model.PrivateAppPayloadType
@@ -329,6 +329,7 @@ internal fun PositionShareDialog(
     var latitudeState by rememberSaveable { mutableStateOf(currentLocation?.latitude?.toString().orEmpty()) }
     var longitudeState by rememberSaveable { mutableStateOf(currentLocation?.longitude?.toString().orEmpty()) }
     var hasSeededInitialLocation by remember { mutableStateOf(false) }
+    var hasSelectedMapLocation by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(currentLocation) {
         if (!hasSeededInitialLocation && currentLocation != null) {
@@ -342,6 +343,7 @@ internal fun PositionShareDialog(
     val parsedLongitude = longitudeState.toDoubleOrNull()
     val selectedLatitude = parsedLatitude ?: currentLocation?.latitude ?: 0.0
     val selectedLongitude = parsedLongitude ?: currentLocation?.longitude ?: 0.0
+    val isLocationResolved = currentLocation != null || (parsedLatitude != null && parsedLongitude != null) || hasSelectedMapLocation
 
     AlertDialog(
         onDismissRequest = onCancel,
@@ -351,34 +353,56 @@ internal fun PositionShareDialog(
                 PositionPickerMap(
                     latitude = selectedLatitude,
                     longitude = selectedLongitude,
+                    seedCoordinates = currentLocation != null || (parsedLatitude != null && parsedLongitude != null),
                     onCoordinatesSelected = { latitude, longitude ->
                         latitudeState = latitude.toString()
                         longitudeState = longitude.toString()
                     },
-                )
-                Text(
-                    text = stringResource(Res.string.position_map_picker_hint),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 12.dp),
-                )
-                OutlinedTextField(
-                    value = latitudeState,
-                    onValueChange = {
-                        latitudeState = it
+                    onMapSelectionConfirmed = { _, _ ->
+                        hasSelectedMapLocation = true
                     },
                 )
-                OutlinedTextField(
-                    value = longitudeState,
-                    onValueChange = {
-                        longitudeState = it
-                    },
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth(0.82f)) {
+                        OutlinedTextField(
+                            value = latitudeState,
+                            onValueChange = {
+                                latitudeState = it
+                            },
+                            label = { Text(stringResource(Res.string.latitude)) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = longitudeState,
+                            onValueChange = {
+                                longitudeState = it
+                            },
+                            label = { Text(stringResource(Res.string.longitude)) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    if (!isLocationResolved) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .padding(top = 20.dp)
+                                .size(24.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                }
                 TextButton(
                     onClick = {
                         currentLocation?.let { location ->
                             latitudeState = location.latitude.toString()
                             longitudeState = location.longitude.toString()
                             hasSeededInitialLocation = true
+                            hasSelectedMapLocation = false
                         }
                     },
                 ) {
@@ -416,7 +440,9 @@ internal fun PositionShareDialog(
 private fun PositionPickerMap(
     latitude: Double,
     longitude: Double,
+    seedCoordinates: Boolean,
     onCoordinatesSelected: (Double, Double) -> Unit,
+    onMapSelectionConfirmed: (Double, Double) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -436,12 +462,15 @@ private fun PositionPickerMap(
     fun updateSelectedPosition() {
         val center = mapView.projection.currentCenter
         latestOnCoordinatesSelected(center.latitude, center.longitude)
+        onMapSelectionConfirmed(center.latitude, center.longitude)
     }
 
     LaunchedEffect(latitude, longitude) {
         val geoPoint = GeoPoint(latitude, longitude)
         mapView.controller.setCenter(geoPoint)
-        latestOnCoordinatesSelected(geoPoint.latitude, geoPoint.longitude)
+        if (seedCoordinates) {
+            latestOnCoordinatesSelected(geoPoint.latitude, geoPoint.longitude)
+        }
         mapView.invalidate()
     }
 
@@ -462,7 +491,9 @@ private fun PositionPickerMap(
             factory = {
                 mapView.apply {
                     controller.setCenter(GeoPoint(latitude, longitude))
-                    latestOnCoordinatesSelected(latitude, longitude)
+                    if (seedCoordinates) {
+                        latestOnCoordinatesSelected(latitude, longitude)
+                    }
                     setOnTouchListener { _, event ->
                         if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
                             updateSelectedPosition()
