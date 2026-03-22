@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -43,15 +44,18 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -76,8 +80,13 @@ import org.meshtastic.core.resources.image_adjustment_duty_cycle
 import org.meshtastic.core.resources.image_adjustment_duty_cycle_summary
 import org.meshtastic.core.resources.image_adjustment_result_line_secondary
 import org.meshtastic.core.resources.image_adjustment_milliseconds_value
+import org.meshtastic.core.resources.latitude
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.position
+import org.meshtastic.core.resources.position_map_picker_hint
+import org.meshtastic.core.resources.position_open_in_map
+import org.meshtastic.core.resources.position_use_current_location
+import org.meshtastic.core.resources.longitude
 import org.meshtastic.core.model.PrivateAppPayloadType
 import org.meshtastic.feature.messaging.image.MIN_IMAGE_DUTY_CYCLE_PERCENT
 import org.meshtastic.feature.messaging.image.buildChunkedPayloadPackets
@@ -91,6 +100,13 @@ import org.meshtastic.feature.messaging.image.gzipPayloadBytes
 import org.meshtastic.core.ui.util.rememberOpenMap
 import org.meshtastic.proto.Config
 import org.meshtastic.proto.Position
+import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapEventsReceiver
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.MapEventsOverlay
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import java.util.Locale
 
 private const val MAX_FILE_SIZE_BYTES = 10L * 1024L * 1024L
@@ -315,27 +331,42 @@ internal fun PositionShareDialog(
     var longitudeState by rememberSaveable { mutableStateOf(currentLocation?.longitude?.toString().orEmpty()) }
     val parsedLatitude = latitudeState.toDoubleOrNull()
     val parsedLongitude = longitudeState.toDoubleOrNull()
+    val selectedLatitude = parsedLatitude ?: currentLocation?.latitude ?: 0.0
+    val selectedLongitude = parsedLongitude ?: currentLocation?.longitude ?: 0.0
 
     AlertDialog(
         onDismissRequest = onCancel,
         title = { Text(stringResource(Res.string.position)) },
         text = {
             Column {
+                PositionPickerMap(
+                    latitude = selectedLatitude,
+                    longitude = selectedLongitude,
+                    onCoordinatesSelected = { latitude, longitude ->
+                        latitudeState = latitude.toString()
+                        longitudeState = longitude.toString()
+                    },
+                )
+                Text(
+                    text = stringResource(Res.string.position_map_picker_hint),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 12.dp),
+                )
                 OutlinedTextField(
                     value = latitudeState,
                     onValueChange = { latitudeState = it },
-                    label = { Text("Latitude") },
+                    label = { Text(stringResource(Res.string.latitude)) },
                 )
                 OutlinedTextField(
                     value = longitudeState,
                     onValueChange = { longitudeState = it },
-                    label = { Text("Longitude") },
+                    label = { Text(stringResource(Res.string.longitude)) },
                 )
                 Text(
                     text = if (parsedLatitude != null && parsedLongitude != null) {
-                        String.format(Locale.US, "Preview: %.6f, %.6f", parsedLatitude, parsedLongitude)
+                        String.format(Locale.US, "%.6f, %.6f", parsedLatitude, parsedLongitude)
                     } else {
-                        "Enter valid coordinates to preview"
+                        stringResource(Res.string.position_map_picker_hint)
                     },
                 )
                 TextButton(
@@ -346,7 +377,7 @@ internal fun PositionShareDialog(
                         }
                     },
                 ) {
-                    Text("Use current location")
+                    Text(stringResource(Res.string.position_use_current_location))
                 }
                 TextButton(
                     onClick = {
@@ -356,7 +387,7 @@ internal fun PositionShareDialog(
                     },
                     enabled = parsedLatitude != null && parsedLongitude != null,
                 ) {
-                    Text("Open map")
+                    Text(stringResource(Res.string.position_open_in_map))
                 }
             }
         },
@@ -382,6 +413,82 @@ internal fun PositionShareDialog(
         },
         dismissButton = {
             TextButton(onClick = onCancel) { Text(stringResource(Res.string.cancel)) }
+        },
+    )
+}
+
+@Composable
+private fun PositionPickerMap(
+    latitude: Double,
+    longitude: Double,
+    onCoordinatesSelected: (Double, Double) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val latestOnCoordinatesSelected by rememberUpdatedState(onCoordinatesSelected)
+    val mapView = remember {
+        MapView(context).apply {
+            Configuration.getInstance().userAgentValue = context.packageName
+            setTileSource(TileSourceFactory.MAPNIK)
+            setMultiTouchControls(true)
+            minZoomLevel = 1.0
+            controller.setZoom(13.0)
+        }
+    }
+    val marker = remember(mapView) {
+        Marker(mapView).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+        }
+    }
+    val mapEventsOverlay = remember(mapView) {
+        MapEventsOverlay(object : MapEventsReceiver {
+            override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
+                latestOnCoordinatesSelected(p.latitude, p.longitude)
+                return true
+            }
+
+            override fun longPressHelper(p: GeoPoint): Boolean {
+                latestOnCoordinatesSelected(p.latitude, p.longitude)
+                return true
+            }
+        })
+    }
+
+    LaunchedEffect(latitude, longitude) {
+        val geoPoint = GeoPoint(latitude, longitude)
+        mapView.controller.setCenter(geoPoint)
+        marker.position = geoPoint
+        mapView.invalidate()
+    }
+
+    DisposableEffect(mapView) {
+        if (mapView.overlays.none { it === mapEventsOverlay }) {
+            mapView.overlays.add(0, mapEventsOverlay)
+        }
+        if (mapView.overlays.none { it === marker }) {
+            mapView.overlays.add(marker)
+        }
+        onDispose {
+            mapView.overlays.remove(mapEventsOverlay)
+            mapView.overlays.remove(marker)
+            mapView.onPause()
+            mapView.onDetach()
+        }
+    }
+
+    AndroidView(
+        factory = {
+            mapView.apply {
+                controller.setCenter(GeoPoint(latitude, longitude))
+                marker.position = GeoPoint(latitude, longitude)
+            }
+        },
+        modifier = modifier
+            .fillMaxWidth()
+            .height(220.dp),
+        update = {
+            marker.position = GeoPoint(latitude, longitude)
+            it.invalidate()
         },
     )
 }

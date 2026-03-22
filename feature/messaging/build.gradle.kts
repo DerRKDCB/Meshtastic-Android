@@ -69,6 +69,7 @@ kotlin {
             implementation(libs.androidx.compose.ui.text)
             implementation(libs.androidx.compose.ui.tooling.preview)
             implementation(libs.jetbrains.lifecycle.runtime.compose)
+            implementation(libs.osmdroid.android)
 
             implementation(libs.androidx.paging.compose)
             implementation(libs.androidx.work.runtime.ktx)
