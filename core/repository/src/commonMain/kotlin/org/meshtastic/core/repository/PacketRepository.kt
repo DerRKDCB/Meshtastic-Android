@@ -108,7 +108,11 @@ interface PacketRepository {
     ): Flow<List<Message>>
 
     /** Returns a non-paged flow of PRIVATE_APP chunk messages for a conversation. */
-    fun getImageChunksFrom(contact: String, getNode: suspend (String?) -> Node): Flow<List<Message>>
+    fun getImageChunksFrom(
+        contact: String,
+        recentChunkLimit: Int,
+        getNode: suspend (String?) -> Node,
+    ): Flow<List<Message>>
 
     /** Returns a paged flow of messages for a conversation. */
     fun getMessagesFromPaged(contact: String, getNode: suspend (String?) -> Node): Flow<PagingData<Message>>

@@ -26,6 +26,7 @@ import org.meshtastic.core.data.repository.QuickChatActionRepository
 import org.meshtastic.core.model.service.ServiceAction
 import org.meshtastic.core.repository.CustomEmojiPrefs
 import org.meshtastic.core.repository.HomoglyphPrefs
+import org.meshtastic.core.repository.LocationRepository
 import org.meshtastic.core.repository.MeshServiceNotifications
 import org.meshtastic.core.repository.RadioConfigRepository
 import org.meshtastic.core.repository.ServiceRepository
@@ -61,6 +62,7 @@ class MessageViewModelTest {
     private lateinit var homoglyphPrefs: HomoglyphPrefs
     private lateinit var uiPrefs: UiPrefs
     private lateinit var meshServiceNotifications: MeshServiceNotifications
+    private lateinit var locationRepository: LocationRepository
 
     private fun setUp() {
         // Create saved state with test contact ID
@@ -87,6 +89,7 @@ class MessageViewModelTest {
             mockk(relaxed = true) { every { homoglyphEncodingEnabled } returns MutableStateFlow<Boolean>(false) }
         uiPrefs = mockk(relaxed = true) { every { showQuickChat } returns MutableStateFlow<Boolean>(false) }
         meshServiceNotifications = mockk(relaxed = true)
+        locationRepository = mockk(relaxed = true)
 
         // Create ViewModel with mocked dependencies
         viewModel =
@@ -101,6 +104,7 @@ class MessageViewModelTest {
                 customEmojiPrefs = customEmojiPrefs,
                 homoglyphEncodingPrefs = homoglyphPrefs,
                 uiPrefs = uiPrefs,
+                locationRepository = locationRepository,
                 meshServiceNotifications = meshServiceNotifications,
             )
     }
