@@ -34,8 +34,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.emptyFlow
 import org.koin.core.annotation.Single
 import org.meshtastic.core.di.CoroutineDispatchers
+import org.meshtastic.core.common.hasLocationPermission
 import org.meshtastic.core.repository.Location
 import org.meshtastic.core.repository.LocationRepository
 import org.meshtastic.core.repository.PlatformAnalytics
@@ -121,6 +123,13 @@ class LocationRepositoryImpl(
     }
 
     /** Observable flow for location updates */
-    @RequiresPermission(anyOf = [ACCESS_COARSE_LOCATION, ACCESS_FINE_LOCATION])
-    override fun getLocations(): Flow<Location> = locationManager.value.requestLocationUpdates()
+    override fun getLocations(): Flow<Location> {
+        if (!context.hasLocationPermission()) {
+            Logger.w { "Location permission missing; skipping location updates" }
+            analytics.track("location_permission_missing")
+            return emptyFlow()
+        }
+
+        return locationManager.value.requestLocationUpdates()
+    }
 }
