@@ -89,6 +89,7 @@ import org.meshtastic.core.resources.image_adjustment_milliseconds_value
 import org.meshtastic.core.resources.latitude
 import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.position
+import org.meshtastic.core.resources.position_current_location_settings_hint
 import org.meshtastic.core.resources.position_use_current_location
 import org.meshtastic.core.resources.longitude
 import org.meshtastic.core.model.PrivateAppPayloadType
@@ -112,6 +113,10 @@ import java.util.Locale
 
 private const val MAX_FILE_SIZE_BYTES = 10L * 1024L * 1024L
 private const val MAX_COMPRESSED_FILE_SIZE_BYTES = 1L * 1024L * 1024L
+private const val SWITZERLAND_CENTER_LATITUDE = 46.8182
+private const val SWITZERLAND_CENTER_LONGITUDE = 8.2275
+private const val EUROPE_OVERVIEW_ZOOM_LEVEL = 5.0
+private const val LOCAL_POSITION_ZOOM_LEVEL = 16.5
 
 private enum class FileSizeLimitState {
     None,
@@ -323,6 +328,8 @@ internal fun FileAdjustmentDialog(
 @Composable
 internal fun PositionShareDialog(
     currentLocation: Location?,
+    canUseCurrentLocation: Boolean,
+    onRequestCurrentLocationPermission: () -> Unit,
     onSend: (ByteArray) -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -341,9 +348,14 @@ internal fun PositionShareDialog(
 
     val parsedLatitude = latitudeState.toDoubleOrNull()
     val parsedLongitude = longitudeState.toDoubleOrNull()
-    val selectedLatitude = parsedLatitude ?: currentLocation?.latitude ?: 0.0
-    val selectedLongitude = parsedLongitude ?: currentLocation?.longitude ?: 0.0
-    val isLocationResolved = currentLocation != null || (parsedLatitude != null && parsedLongitude != null) || hasSelectedMapLocation
+    val isUsingFallbackDefaultLocation = parsedLatitude == null && parsedLongitude == null && currentLocation == null
+    val selectedLatitude = parsedLatitude ?: currentLocation?.latitude ?: SWITZERLAND_CENTER_LATITUDE
+    val selectedLongitude = parsedLongitude ?: currentLocation?.longitude ?: SWITZERLAND_CENTER_LONGITUDE
+    val initialZoomLevel = if (isUsingFallbackDefaultLocation) EUROPE_OVERVIEW_ZOOM_LEVEL else LOCAL_POSITION_ZOOM_LEVEL
+    val isLocationResolved =
+        (parsedLatitude != null && parsedLongitude != null) ||
+            hasSelectedMapLocation ||
+            (canUseCurrentLocation && currentLocation != null)
 
     AlertDialog(
         onDismissRequest = onCancel,
@@ -353,6 +365,7 @@ internal fun PositionShareDialog(
                 PositionPickerMap(
                     latitude = selectedLatitude,
                     longitude = selectedLongitude,
+                    initialZoomLevel = initialZoomLevel,
                     seedCoordinates = currentLocation != null || (parsedLatitude != null && parsedLongitude != null),
                     onCoordinatesSelected = { latitude, longitude ->
                         latitudeState = latitude.toString()
@@ -387,7 +400,7 @@ internal fun PositionShareDialog(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
-                    if (!isLocationResolved) {
+                    if (canUseCurrentLocation && !isLocationResolved) {
                         CircularProgressIndicator(
                             modifier = Modifier
                                 .padding(top = 20.dp)
@@ -398,15 +411,26 @@ internal fun PositionShareDialog(
                 }
                 TextButton(
                     onClick = {
-                        currentLocation?.let { location ->
-                            latitudeState = location.latitude.toString()
-                            longitudeState = location.longitude.toString()
-                            hasSeededInitialLocation = true
-                            hasSelectedMapLocation = false
+                        if (!canUseCurrentLocation) {
+                            onRequestCurrentLocationPermission()
+                        } else {
+                            currentLocation?.let { location ->
+                                latitudeState = location.latitude.toString()
+                                longitudeState = location.longitude.toString()
+                                hasSeededInitialLocation = true
+                                hasSelectedMapLocation = false
+                            }
                         }
                     },
                 ) {
                     Text(stringResource(Res.string.position_use_current_location))
+                }
+                if (!canUseCurrentLocation) {
+                    Text(
+                        text = stringResource(Res.string.position_current_location_settings_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         },
@@ -440,6 +464,7 @@ internal fun PositionShareDialog(
 private fun PositionPickerMap(
     latitude: Double,
     longitude: Double,
+    initialZoomLevel: Double,
     seedCoordinates: Boolean,
     onCoordinatesSelected: (Double, Double) -> Unit,
     onMapSelectionConfirmed: (Double, Double) -> Unit,
@@ -454,7 +479,7 @@ private fun PositionPickerMap(
             setMultiTouchControls(true)
             setFlingEnabled(false)
             minZoomLevel = 1.0
-            controller.setZoom(13.0)
+            controller.setZoom(initialZoomLevel)
         }
     }
     val pinDrawable = remember(mapView) { Marker(mapView).icon }
@@ -471,6 +496,11 @@ private fun PositionPickerMap(
         if (seedCoordinates) {
             latestOnCoordinatesSelected(geoPoint.latitude, geoPoint.longitude)
         }
+        mapView.invalidate()
+    }
+
+    LaunchedEffect(initialZoomLevel) {
+        mapView.controller.setZoom(initialZoomLevel)
         mapView.invalidate()
     }
 

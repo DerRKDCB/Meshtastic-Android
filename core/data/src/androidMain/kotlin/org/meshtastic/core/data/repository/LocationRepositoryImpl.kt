@@ -19,9 +19,11 @@ package org.meshtastic.core.data.repository
 import android.Manifest.permission.ACCESS_COARSE_LOCATION
 import android.Manifest.permission.ACCESS_FINE_LOCATION
 import android.app.Application
+import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.Build
 import androidx.annotation.RequiresPermission
+import androidx.core.content.ContextCompat
 import androidx.core.location.LocationCompat
 import androidx.core.location.LocationListenerCompat
 import androidx.core.location.LocationManagerCompat
@@ -63,6 +65,16 @@ class LocationRepositoryImpl(
 
     @RequiresPermission(anyOf = [ACCESS_COARSE_LOCATION, ACCESS_FINE_LOCATION])
     private fun LocationManager.requestLocationUpdates(): Flow<Location> = callbackFlow {
+        val hasPermission =
+            ContextCompat.checkSelfPermission(context, ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasPermission) {
+            Logger.i { "Skipping location updates: missing location permission" }
+            _receivingLocationUpdates.value = false
+            close()
+            return@callbackFlow
+        }
+
         val locationRequest =
             LocationRequestCompat.Builder(DEFAULT_INTERVAL_MS)
                 .setMinUpdateDistanceMeters(MIN_DISTANCE_METERS)
@@ -91,12 +103,7 @@ class LocationRepositoryImpl(
             }
         }
 
-        Logger.i {
-            "Starting location updates with $providerList intervalMs=$DEFAULT_INTERVAL_MS " +
-                "and minDistanceM=$MIN_DISTANCE_METERS"
-        }
-        _receivingLocationUpdates.value = true
-        analytics.track("location_start")
+        var startedLocationUpdates = false
 
         @Suppress("TooGenericExceptionCaught")
         try {
@@ -109,14 +116,29 @@ class LocationRepositoryImpl(
                     locationListener,
                 )
             }
+            startedLocationUpdates = true
+            Logger.i {
+                "Starting location updates with $providerList intervalMs=$DEFAULT_INTERVAL_MS " +
+                    "and minDistanceM=$MIN_DISTANCE_METERS"
+            }
+            _receivingLocationUpdates.value = true
+            analytics.track("location_start")
+        } catch (e: SecurityException) {
+            Logger.w(e) { "Location updates denied by platform permission checks" }
+            _receivingLocationUpdates.value = false
+            close()
         } catch (e: Exception) {
-            close(e)
+            Logger.w(e) { "Unable to start location updates" }
+            _receivingLocationUpdates.value = false
+            close()
         }
 
         awaitClose {
-            Logger.i { "Stopping location requests" }
             _receivingLocationUpdates.value = false
-            analytics.track("location_stop")
+            if (startedLocationUpdates) {
+                Logger.i { "Stopping location requests" }
+                analytics.track("location_stop")
+            }
 
             LocationManagerCompat.removeUpdates(this@requestLocationUpdates, locationListener)
         }

@@ -18,10 +18,15 @@
 
 package org.meshtastic.feature.messaging
 
+import android.Manifest
+import android.content.Intent
 import android.content.ClipData
 import android.graphics.Bitmap
 import android.location.Location
 import android.net.Uri
+import android.content.pm.PackageManager
+import android.net.Uri as AndroidUri
+import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
@@ -56,6 +61,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -70,6 +76,12 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import kotlinx.coroutines.launch
@@ -95,7 +107,7 @@ import org.meshtastic.core.resources.attachment
 import org.meshtastic.core.ui.component.SharedContactDialog
 import org.meshtastic.core.ui.component.smartScrollToIndex
 import org.meshtastic.core.ui.theme.AppTheme
-import org.meshtastic.core.ui.util.rememberOpenMap
+import org.meshtastic.core.ui.util.findActivity
 import org.meshtastic.feature.messaging.component.ActionModeTopBar
 import org.meshtastic.feature.messaging.component.DeleteMessageDialog
 import org.meshtastic.feature.messaging.component.MESSAGE_CHARACTER_LIMIT_BYTES
@@ -147,7 +159,6 @@ fun MessageScreen(
     val imageChunkMessages by viewModel.imageChunkMessages.collectAsStateWithLifecycle()
     val contactSettings by viewModel.contactSettings.collectAsStateWithLifecycle(initialValue = emptyMap())
     val homoglyphEncodingEnabled by viewModel.homoglyphEncodingEnabled.collectAsStateWithLifecycle(initialValue = false)
-    val currentLocation by viewModel.currentLocation.collectAsStateWithLifecycle(initialValue = null)
 
     // UI State managed within this Composable
     var replyingToPacketId by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -378,7 +389,6 @@ fun MessageScreen(
                     isSendingChunks = isSendingChunks,
                     isHomoglyphEncodingEnabled = homoglyphEncodingEnabled,
                     loraConfig = channels.lora_config ?: Channel.default.loraConfig,
-                    currentLocation = currentLocation,
                     textFieldState = messageInputState,
                     onSendMessage = {
                         val messageText = messageInputState.text.toString().trim { it.isWhitespace() }
@@ -469,7 +479,6 @@ private fun MessageInput(
     isSendingChunks: Boolean = false,
     isHomoglyphEncodingEnabled: Boolean,
     loraConfig: Config.LoRaConfig,
-    currentLocation: Location? = null,
     textFieldState: TextFieldState,
     modifier: Modifier = Modifier,
     maxByteSize: Int = MESSAGE_CHARACTER_LIMIT_BYTES,
@@ -478,7 +487,67 @@ private fun MessageInput(
     contactKey: String,
     onStopSendingChunks: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val currentTextRaw = textFieldState.text.toString()
+
+    var hasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var openSettingsOnPermissionDenied by remember { mutableStateOf(false) }
+
+    fun refreshLocationPermissionState() {
+        hasLocationPermission =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+    }
+
+    val appSettingsLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            refreshLocationPermissionState()
+        }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer =
+            LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    refreshLocationPermissionState()
+                }
+            }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    fun openAppSettingsForLocation() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = AndroidUri.fromParts("package", context.packageName, null)
+        }
+        appSettingsLauncher.launch(intent)
+    }
+
+    fun isLocationPermissionPermanentlyDenied(): Boolean {
+        val activity = context.findActivity() ?: return false
+        val isDenied =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) !=
+                PackageManager.PERMISSION_GRANTED
+        val shouldShowRationale =
+            ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION)
+        return isDenied && !shouldShowRationale
+    }
+
+    val locationPermissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+            hasLocationPermission = isGranted
+            if (!isGranted && openSettingsOnPermissionDenied) {
+                if (isLocationPermissionPermanentlyDenied()) {
+                    openAppSettingsForLocation()
+                }
+            }
+            openSettingsOnPermissionDenied = false
+        }
 
     val currentText =
         if (isHomoglyphEncodingEnabled) {
@@ -498,6 +567,13 @@ private fun MessageInput(
 
     var showAttachmentMenu by remember { mutableStateOf(false) }
     var showPositionDialog by remember { mutableStateOf(false) }
+
+    val currentLocation by
+        if (showPositionDialog && hasLocationPermission && viewModel != null) {
+            viewModel.currentLocation.collectAsStateWithLifecycle(initialValue = null)
+        } else {
+            remember { mutableStateOf<Location?>(null) }
+        }
 
     LaunchedEffect(isEnabled, isSendingChunks) {
         if (!isEnabled && !isSendingChunks) {
@@ -522,8 +598,6 @@ private fun MessageInput(
     val filePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         selectedFileUri = uri
     }
-    val openMap = rememberOpenMap()
-
     OutlinedTextField(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
         state = textFieldState,
@@ -609,6 +683,10 @@ private fun MessageInput(
                 text = { Text(stringResource(Res.string.position)) },
                 onClick = {
                     showAttachmentMenu = false
+                    if (!hasLocationPermission) {
+                        openSettingsOnPermissionDenied = false
+                        locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                    }
                     showPositionDialog = true
                 }
             )
@@ -643,6 +721,11 @@ private fun MessageInput(
     if (showPositionDialog) {
         PositionShareDialog(
             currentLocation = currentLocation,
+            canUseCurrentLocation = hasLocationPermission,
+            onRequestCurrentLocationPermission = {
+                openSettingsOnPermissionDenied = true
+                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            },
             onSend = { payloadBytes ->
                 if (viewModel != null) {
                     viewModel.sendPrivateAppPayload(payload = payloadBytes, contactKey = contactKey)

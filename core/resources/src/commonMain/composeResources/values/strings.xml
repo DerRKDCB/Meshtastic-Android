@@ -198,6 +198,7 @@
     <string name="position">Position</string>
     <string name="position_map_picker_hint">Tap the map to choose a position.</string>
     <string name="position_use_current_location">Use current location</string>
+    <string name="position_current_location_settings_hint">Current location needs Location permission. Tap above to open app settings.</string>
     <string name="position_open_in_map">Open map</string>
     <string name="file_adjustment_preview">File preview</string>
     <string name="file_adjustment_load_failed">Unable to load file</string>
