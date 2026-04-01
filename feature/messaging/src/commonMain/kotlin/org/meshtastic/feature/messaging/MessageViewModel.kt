@@ -101,6 +101,7 @@ class MessageViewModel(
         packetRepository.getContactSettings().stateInWhileSubscribed(initialValue = emptyMap())
 
     private val contactKeyForPagedMessages: MutableStateFlow<String?> = MutableStateFlow(null)
+    private val imageChunkLoadPages: MutableStateFlow<Int> = MutableStateFlow(1)
     private val pagedMessagesForContactKey: Flow<PagingData<Message>> =
         combine(contactKeyForPagedMessages.filterNotNull(), _showFiltered, contactSettings) {
                 contactKey,
@@ -156,9 +157,16 @@ class MessageViewModel(
             .stateInWhileSubscribed(0)
 
     val imageChunkMessages: StateFlow<List<Message>> =
-        contactKeyForPagedMessages
-            .filterNotNull()
-            .flatMapLatest { packetRepository.getImageChunksFrom(it, ::getNode) }
+        combine(contactKeyForPagedMessages.filterNotNull(), imageChunkLoadPages) { contactKey, pages ->
+            contactKey to pages
+        }
+            .flatMapLatest { (contactKey, pages) ->
+                packetRepository.getImageChunksFrom(
+                    contact = contactKey,
+                    recentChunkLimit = pages * IMAGE_CHUNK_PAGE_SIZE,
+                    getNode = ::getNode,
+                )
+            }
             .stateInWhileSubscribed(emptyList())
 
     val currentLocation: StateFlow<Location?> =
@@ -171,13 +179,19 @@ class MessageViewModel(
         val contactKey = savedStateHandle.get<String>("contactKey")
         if (contactKey != null) {
             contactKeyForPagedMessages.value = contactKey
+            imageChunkLoadPages.value = 1
         }
     }
 
     fun setContactKey(contactKey: String) {
         if (contactKeyForPagedMessages.value != contactKey) {
             contactKeyForPagedMessages.value = contactKey
+            imageChunkLoadPages.value = 1
         }
+    }
+
+    fun requestOlderImageChunks() {
+        imageChunkLoadPages.update { pages -> pages + 1 }
     }
 
     fun setTitle(title: String) {
@@ -187,6 +201,7 @@ class MessageViewModel(
     fun getMessagesFromPaged(contactKey: String): Flow<PagingData<Message>> {
         if (contactKeyForPagedMessages.value != contactKey) {
             contactKeyForPagedMessages.value = contactKey
+            imageChunkLoadPages.value = 1
         }
         return pagedMessagesForContactKey
     }
@@ -201,6 +216,7 @@ class MessageViewModel(
     fun getMessagesFlow(contactKey: String, limit: Int? = null): Flow<List<Message>> {
         if (contactKeyForPagedMessages.value != contactKey) {
             contactKeyForPagedMessages.value = contactKey
+            imageChunkLoadPages.value = 1
         }
         return flow { emitAll(packetRepository.getMessagesFrom(contactKey, limit = limit, getNode = ::getNode)) }
     }
@@ -296,4 +312,8 @@ class MessageViewModel(
             val unreadCount = packetRepository.getUnreadCount(contact)
             if (unreadCount == 0) meshServiceNotifications.cancelMessageNotification(contact)
         }
+
+    companion object {
+        private const val IMAGE_CHUNK_PAGE_SIZE = 100
+    }
 }

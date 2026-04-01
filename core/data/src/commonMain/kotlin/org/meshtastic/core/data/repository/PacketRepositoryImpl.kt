@@ -28,6 +28,7 @@ import kotlinx.coroutines.withContext
 import okio.ByteString.Companion.toByteString
 import org.koin.core.annotation.Single
 import org.meshtastic.core.database.DatabaseProvider
+import org.meshtastic.core.database.entity.PacketEntity
 import org.meshtastic.core.database.entity.toReaction
 import org.meshtastic.core.di.CoroutineDispatchers
 import org.meshtastic.core.model.ContactSettings
@@ -37,6 +38,7 @@ import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
 import org.meshtastic.proto.ChannelSettings
+import org.meshtastic.proto.ChunkedPayload
 import org.meshtastic.proto.PortNum
 import org.meshtastic.core.database.entity.ContactSettings as ContactSettingsEntity
 import org.meshtastic.core.database.entity.Packet as RoomPacket
@@ -165,11 +167,26 @@ class PacketRepositoryImpl(private val dbManager: DatabaseProvider, private val 
         }
     }
 
-    override fun getImageChunksFrom(contact: String, getNode: suspend (String?) -> Node): Flow<List<Message>> =
+    override fun getImageChunksFrom(
+        contact: String,
+        recentChunkLimit: Int,
+        getNode: suspend (String?) -> Node,
+    ): Flow<List<Message>> =
         dbManager.currentDb
-            .flatMapLatest { db -> db.packetDao().getImageChunksFrom(contact) }
-            .mapLatest { packets ->
-                packets.map { packet -> packet.toMessage(getNode) }
+            .flatMapLatest { db ->
+                db.packetDao().getRecentImageChunksFrom(contact, recentChunkLimit.coerceAtLeast(1))
+                    .mapLatest { recentPackets ->
+                        val dao = db.packetDao()
+                        val packetsToRender =
+                            dao.extendImageChunksForOldestPartialPayload(
+                                contact = contact,
+                                recentPackets = recentPackets,
+                            )
+
+                        packetsToRender
+                            .sortedWith(compareBy<PacketEntity> { it.packet.received_time }.thenBy { it.packet.uuid })
+                            .map { packet -> packet.toMessage(getNode) }
+                    }
             }
 
     override fun getMessagesFromPaged(contact: String, getNode: suspend (String?) -> Node): Flow<PagingData<Message>> =
@@ -483,9 +500,106 @@ class PacketRepositoryImpl(private val dbManager: DatabaseProvider, private val 
         sfpp_hash = sfppHash,
     )
 
+    private data class ImagePayloadKey(
+        val senderId: String,
+        val payloadId: Int,
+    )
+
+    private data class ImageChunkMetadata(
+        val key: ImagePayloadKey,
+        val chunkIndex: Int,
+        val chunkCount: Int,
+    )
+
+    private suspend fun org.meshtastic.core.database.dao.PacketDao.extendImageChunksForOldestPartialPayload(
+        contact: String,
+        recentPackets: List<PacketEntity>,
+    ): List<PacketEntity> {
+        if (recentPackets.isEmpty()) return emptyList()
+
+        val packets = recentPackets.toMutableList()
+        val oldestPartialKey = findOldestPartialPayloadKey(packets) ?: return packets
+
+        var offset = packets.size
+        while (!isPayloadComplete(oldestPartialKey, packets)) {
+            val nextPage = getImageChunksPage(contact, IMAGE_CHUNK_HISTORY_PAGE_SIZE, offset)
+            if (nextPage.isEmpty()) {
+                break
+            }
+            packets += nextPage
+            offset += nextPage.size
+        }
+
+        return packets
+    }
+
+    private fun findOldestPartialPayloadKey(packets: List<PacketEntity>): ImagePayloadKey? {
+        val chunkIndexesByPayload = mutableMapOf<ImagePayloadKey, MutableSet<Int>>()
+        val expectedChunkCountByPayload = mutableMapOf<ImagePayloadKey, Int>()
+
+        packets.forEach { packetEntity ->
+            packetEntity.getImageChunkMetadataOrNull()?.let { metadata ->
+                chunkIndexesByPayload.getOrPut(metadata.key) { mutableSetOf() } += metadata.chunkIndex
+                expectedChunkCountByPayload[metadata.key] =
+                    maxOf(expectedChunkCountByPayload[metadata.key] ?: 0, metadata.chunkCount)
+            }
+        }
+
+        return packets.asReversed()
+            .asSequence()
+            .mapNotNull { it.getImageChunkMetadataOrNull()?.key }
+            .firstOrNull { key ->
+                val expected = expectedChunkCountByPayload[key] ?: return@firstOrNull false
+                val available = chunkIndexesByPayload[key]?.size ?: 0
+                available in 1 until expected
+            }
+    }
+
+    private fun isPayloadComplete(key: ImagePayloadKey, packets: List<PacketEntity>): Boolean {
+        val metadata =
+            packets
+                .asSequence()
+                .mapNotNull { it.getImageChunkMetadataOrNull() }
+                .filter { it.key == key }
+                .toList()
+
+        if (metadata.isEmpty()) {
+            return true
+        }
+
+        val availableChunks = metadata.map { it.chunkIndex }.toSet().size
+        val expectedChunks = metadata.maxOfOrNull { it.chunkCount } ?: return true
+        return availableChunks >= expectedChunks
+    }
+
+    private fun PacketEntity.getImageChunkMetadataOrNull(): ImageChunkMetadata? {
+        val packetData = packet.data
+        if (packetData.dataType != PortNum.PRIVATE_APP.value) {
+            return null
+        }
+
+        val chunkedPayload =
+            packetData.bytes
+                ?.let { bytes -> runCatching { ChunkedPayload.ADAPTER.decode(bytes) }.getOrNull() }
+                ?: return null
+        val payloadId = chunkedPayload.payload_id
+        val chunkIndex = chunkedPayload.chunk_index
+        val chunkCount = chunkedPayload.chunk_count
+        if (payloadId <= 0 || chunkIndex <= 0 || chunkCount <= 0 || chunkIndex > chunkCount) {
+            return null
+        }
+
+        return ImageChunkMetadata(
+            key = ImagePayloadKey(senderId = packetData.from.orEmpty(), payloadId = payloadId),
+            chunkIndex = chunkIndex,
+            chunkCount = chunkCount,
+        )
+    }
+
     companion object {
         private const val CONTACTS_PAGE_SIZE = 30
         private const val MESSAGES_PAGE_SIZE = 50
+        private const val IMAGE_CHUNK_HISTORY_PAGE_SIZE = 100
         private const val DELETE_CHUNK_SIZE = 500
         private const val MILLISECONDS_IN_SECOND = 1000L
     }

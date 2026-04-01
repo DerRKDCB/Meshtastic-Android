@@ -55,6 +55,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.resources.Res
@@ -87,6 +88,7 @@ internal data class MessageListHandlers(
     val onDeleteMessages: (List<Long>) -> Unit,
     val onSendMessage: (String, String) -> Unit,
     val onReply: (Message?) -> Unit,
+    val onLoadOlderImageChunks: () -> Unit,
 )
 
 internal data class MessageListPagedState(
@@ -162,6 +164,13 @@ internal fun MessageListPaged(
 
     // Track unread count based on scroll position
     UpdateUnreadCountPaged(listState = listState, messages = state.timelineMessages, onUnreadChange = handlers.onUnreadChanged)
+
+    // Only request older image chunks when the user scrolls back into older timeline history.
+    LazyLoadOlderImageChunks(
+        listState = listState,
+        messageCount = state.timelineMessages.size,
+        onLoadOlderImageChunks = handlers.onLoadOlderImageChunks,
+    )
 
     // Auto-scroll to bottom when new messages arrive
     AutoScrollToBottomPaged(
@@ -541,6 +550,32 @@ private fun findLastUnreadMessageIndex(messages: List<Message>): Int? {
     }
 }
 
+@Composable
+private fun LazyLoadOlderImageChunks(
+    listState: LazyListState,
+    messageCount: Int,
+    onLoadOlderImageChunks: () -> Unit,
+) {
+    val currentMessageCount by rememberUpdatedState(messageCount)
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val currentCount = currentMessageCount
+            val hasScrolledBack = listState.firstVisibleItemIndex > 0
+            val oldestVisibleIndex = listState.layoutInfo.visibleItemsInfo.maxOfOrNull { it.index } ?: 0
+            val nearOldestVisibleEdge =
+                oldestVisibleIndex >=
+                    (currentCount - ImageChunkUiDefaults.OLDER_HISTORY_PREFETCH_THRESHOLD).coerceAtLeast(0)
+            hasScrolledBack && nearOldestVisibleEdge
+        }
+            .distinctUntilChanged()
+            .collectLatest { shouldLoadOlder ->
+                if (shouldLoadOlder) {
+                    onLoadOlderImageChunks()
+                }
+            }
+    }
+}
+
 @OptIn(FlowPreview::class)
 @Composable
 private fun UpdateUnreadCountPaged(
@@ -602,3 +637,8 @@ private fun UpdateUnreadCountPaged(
             }
     }
 }
+
+private object ImageChunkUiDefaults {
+    const val OLDER_HISTORY_PREFETCH_THRESHOLD = 30
+}
+

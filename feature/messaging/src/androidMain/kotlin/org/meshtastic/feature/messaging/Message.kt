@@ -421,6 +421,7 @@ fun MessageScreen(
                     onDeleteMessages = { viewModel.deleteMessages(it) },
                     onSendMessage = { text, key -> viewModel.sendMessage(text, key) },
                     onReply = { message -> replyingToPacketId = message?.packetId },
+                    onLoadOlderImageChunks = viewModel::requestOlderImageChunks,
                 ),
                 quickEmojis = viewModel.frequentEmojis,
             )

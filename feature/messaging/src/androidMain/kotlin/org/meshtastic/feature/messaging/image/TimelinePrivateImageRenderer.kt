@@ -57,6 +57,9 @@ internal data class TimelinePrivateImageMessageData(
 )
 
 private val timelineImageLogger = Logger.withTag("MsgTimelineImage")
+private const val IMAGE_UNAVAILABLE_DECODE_FAILED_LABEL = "Image unavailable (decode failed)"
+private const val IMAGE_UNAVAILABLE_INVALID_CHUNKS_LABEL = "Image unavailable (invalid chunks)"
+private const val IMAGE_ATTACHMENT_LABEL = "Image"
 
 private fun isGzipPayload(inputBytes: ByteArray): Boolean {
     return inputBytes.size >= 2 && inputBytes[0] == 0x1f.toByte() && inputBytes[1] == 0x8b.toByte()
@@ -151,7 +154,9 @@ private fun decodeBitmapBestEffort(payloadBytes: ByteArray): Bitmap? {
     gunzipBestEffortPartial(payloadBytes)?.let { candidates += it }
 
     candidates.forEach { candidateBytes ->
-        BitmapFactory.decodeByteArray(candidateBytes, 0, candidateBytes.size)?.let {
+        runCatching {
+            BitmapFactory.decodeByteArray(candidateBytes, 0, candidateBytes.size)
+        }.getOrNull()?.let {
             timelineImageLogger.d {
                 "decodeBitmapBestEffort decoded direct: payloadBytes=${payloadBytes.size} candidateBytes=${candidateBytes.size}"
             }
@@ -159,7 +164,9 @@ private fun decodeBitmapBestEffort(payloadBytes: ByteArray): Bitmap? {
         }
 
         val withEoi = candidateBytes + byteArrayOf(0xFF.toByte(), 0xD9.toByte())
-        BitmapFactory.decodeByteArray(withEoi, 0, withEoi.size)?.let {
+        runCatching {
+            BitmapFactory.decodeByteArray(withEoi, 0, withEoi.size)
+        }.getOrNull()?.let {
             timelineImageLogger.d {
                 "decodeBitmapBestEffort decoded withEOI: payloadBytes=${payloadBytes.size} candidateBytes=${candidateBytes.size}"
             }
@@ -243,12 +250,23 @@ internal fun rememberTimelineImageRows(
                     }
                     .forEach { (payloadKey, group) ->
                         activePayloadKeys += payloadKey
-                        val imageData = privateImageRenderState.imageByPayloadKey[payloadKey] ?: return@forEach
                         val representative =
                             representativeRowUuidByPayload[payloadKey]
                                 ?.let { stableUuid -> group.firstOrNull { it.uuid == stableUuid } }
                                 ?: group.minByOrNull { it.privateChunkIndex ?: Int.MAX_VALUE }
                                 ?: return@forEach
+
+                        val imageData =
+                            privateImageRenderState.imageByPayloadKey[payloadKey]
+                                ?: TimelinePrivateImageMessageData(
+                                    bitmap = null,
+                                    availableChunks = group.count { (it.privateChunkBytes?.isNotEmpty() == true) },
+                                    totalChunks =
+                                    group.firstOrNull()?.privateChunkCount?.takeIf { it > 0 }
+                                        ?: group.size,
+                                    attachmentLabel = IMAGE_UNAVAILABLE_INVALID_CHUNKS_LABEL,
+                                )
+
                         representativeRowUuidByPayload[payloadKey] = representative.uuid
                         imageByMessageUuid[representative.uuid] = imageData
                         imageData.attachmentLabel?.let { attachmentLabelByMessageUuid[representative.uuid] = it }
@@ -299,12 +317,18 @@ internal fun buildPrivateImageRenderState(
             val chunkIndex = message.privateChunkIndex
             val chunkCount = message.privateChunkCount
             val chunkBytes = message.privateChunkBytes
-            if (
-                message.dataType == PortNum.PRIVATE_APP.value &&
-                    payloadId != null &&
+            val hasValidChunkMetadata =
+                payloadId != null &&
                     chunkIndex != null &&
                     chunkCount != null &&
-                    chunkBytes != null
+                    chunkIndex > 0 &&
+                    chunkCount > 0 &&
+                    chunkIndex <= chunkCount &&
+                    chunkBytes != null &&
+                    chunkBytes.isNotEmpty()
+            if (
+                message.dataType == PortNum.PRIVATE_APP.value &&
+                    hasValidChunkMetadata
             ) {
                 ChunkMessage(message, payloadId, chunkIndex, chunkCount, chunkBytes)
             } else {
@@ -319,7 +343,8 @@ internal fun buildPrivateImageRenderState(
 
     val imageByPayloadKey = mutableMapOf<TimelineImagePayloadKey, TimelinePrivateImageMessageData>()
 
-    chunkMessages.groupBy { it.payloadId }.values.forEach { group ->
+    chunkMessages.groupBy { TimelineImagePayloadKey(senderNum = it.message.node.num, payloadId = it.payloadId) }
+        .forEach { (payloadKey, group) ->
         val expectedCount = group.firstOrNull()?.count ?: return@forEach
         val chunksByIndex =
             group
@@ -331,8 +356,8 @@ internal fun buildPrivateImageRenderState(
                 }
         val availableChunks = chunksByIndex.size
         val duplicateChunkCount = group.size - availableChunks
-        val payloadId = group.firstOrNull()?.payloadId ?: return@forEach
-        val senderNum = group.firstOrNull()?.message?.node?.num ?: 0
+        val payloadId = payloadKey.payloadId
+        val senderNum = payloadKey.senderNum
         val cacheKey = "$senderNum:$payloadId"
         val cachedEntry = decodeCache[cacheKey]
         val payloadBytes =
@@ -397,12 +422,20 @@ internal fun buildPrivateImageRenderState(
                 PrivateAppPayloadType.Image -> "Image"
                 null -> null
             }
-        imageByPayloadKey[TimelineImagePayloadKey(senderNum = senderNum, payloadId = payloadId)] =
+        val fallbackAttachmentLabel =
+            when {
+                attachmentLabel != null -> attachmentLabel
+                decodedPayload?.type == PrivateAppPayloadType.Image && bitmap == null -> IMAGE_UNAVAILABLE_DECODE_FAILED_LABEL
+                decodedPayload?.type == PrivateAppPayloadType.Image -> IMAGE_ATTACHMENT_LABEL
+                else -> null
+            }
+
+        imageByPayloadKey[payloadKey] =
             TimelinePrivateImageMessageData(
                 bitmap = bitmap,
                 availableChunks = availableChunks,
                 totalChunks = expectedCount,
-                attachmentLabel = attachmentLabel,
+                attachmentLabel = fallbackAttachmentLabel,
                 decodedPayload = decodedPayload,
             )
     }

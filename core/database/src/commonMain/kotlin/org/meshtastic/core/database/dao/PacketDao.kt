@@ -216,6 +216,30 @@ interface PacketDao {
     )
     fun getImageChunksFrom(contact: String): Flow<List<PacketEntity>>
 
+    @Transaction
+    @Query(
+        """
+    SELECT * FROM packet
+    WHERE (myNodeNum = 0 OR myNodeNum = (SELECT myNodeNum FROM my_node))
+        AND port_num = 256 AND contact_key = :contact
+    ORDER BY received_time DESC, uuid DESC
+    LIMIT :limit
+    """,
+    )
+    fun getRecentImageChunksFrom(contact: String, limit: Int): Flow<List<PacketEntity>>
+
+    @Transaction
+    @Query(
+        """
+    SELECT * FROM packet
+    WHERE (myNodeNum = 0 OR myNodeNum = (SELECT myNodeNum FROM my_node))
+        AND port_num = 256 AND contact_key = :contact
+    ORDER BY received_time DESC, uuid DESC
+    LIMIT :limit OFFSET :offset
+    """,
+    )
+    suspend fun getImageChunksPage(contact: String, limit: Int, offset: Int): List<PacketEntity>
+
     @Query(
         """
     SELECT * FROM packet
