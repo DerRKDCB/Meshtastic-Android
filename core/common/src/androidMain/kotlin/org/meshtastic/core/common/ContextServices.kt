@@ -14,15 +14,11 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-@file:Suppress("unused")
-
 package org.meshtastic.core.common
 
 import android.Manifest
 import android.app.Application
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.Build
@@ -31,13 +27,6 @@ import androidx.core.content.ContextCompat
 /** Global accessor for Android Application. Must be initialized at app startup. */
 object ContextServices {
     lateinit var app: Application
-}
-
-/** Checks if the device has a GPS receiver. */
-@Suppress("unused")
-fun Context.hasGps(): Boolean {
-    val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-    return lm?.allProviders?.contains(LocationManager.GPS_PROVIDER) == true
 }
 
 /** Checks if the device has a GPS receiver and it is currently disabled. */
@@ -87,19 +76,4 @@ fun Context.hasLocationPermission(): Boolean {
         ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
     return fineGranted || coarseGranted
-}
-
-/**
- * Extension for Context to register a BroadcastReceiver in a compatible way across Android versions.
- *
- * @param receiver The receiver to register.
- * @param filter The intent filter.
- * @param flag The export flag (defaults to [ContextCompat.RECEIVER_EXPORTED]).
- */
-fun Context.registerReceiverCompat(
-    receiver: BroadcastReceiver,
-    filter: IntentFilter,
-    flag: Int = ContextCompat.RECEIVER_EXPORTED,
-) {
-    ContextCompat.registerReceiver(this, receiver, filter, flag)
 }
