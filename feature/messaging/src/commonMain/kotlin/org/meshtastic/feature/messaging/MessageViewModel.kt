@@ -16,11 +16,13 @@
  */
 package org.meshtastic.feature.messaging
 
+import co.touchlab.kermit.Logger
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,6 +36,9 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.koin.core.annotation.KoinViewModel
@@ -57,7 +62,8 @@ import org.meshtastic.core.repository.usecase.SendMessageUseCase
 import org.meshtastic.core.ui.viewmodel.stateInWhileSubscribed
 import org.meshtastic.proto.ChannelSet
 
-@Suppress("LongParameterList", "TooManyFunctions")
+@Suppress("LongParameterList", "TooManyFunctions", "UnusedPrivateProperty")
+@OptIn(ExperimentalCoroutinesApi::class)
 @KoinViewModel
 class MessageViewModel(
     savedStateHandle: SavedStateHandle,
@@ -73,6 +79,8 @@ class MessageViewModel(
     private val meshServiceNotifications: MeshServiceNotifications,
     private val sendMessageUseCase: SendMessageUseCase,
 ) : ViewModel() {
+    private val locationDebugLogger = Logger.withTag("MsgLocationDebug")
+
     private val _title = MutableStateFlow("")
     val title: StateFlow<String> = _title.asStateFlow()
 
@@ -170,10 +178,32 @@ class MessageViewModel(
             .stateInWhileSubscribed(emptyList())
 
     val currentLocation: StateFlow<Location?> =
-        locationRepository
-            .getLocations()
-            .map { it }
-            .stateInWhileSubscribed(initialValue = null)
+        flow {
+            val sessionId = "vm-${System.identityHashCode(this@MessageViewModel)}-${System.nanoTime()}"
+            var emissionCount = 0
+            locationDebugLogger.i { "[$sessionId] currentLocation flow setup" }
+            emitAll(
+                locationRepository
+                    .getLocations()
+                    .onStart {
+                        locationDebugLogger.i { "[$sessionId] currentLocation subscription started" }
+                    }
+                    .onEach { location ->
+                        emissionCount += 1
+                        if (emissionCount == 1) {
+                            locationDebugLogger.i { "[$sessionId] first currentLocation emission: $location" }
+                        } else {
+                            locationDebugLogger.v { "[$sessionId] currentLocation emission #$emissionCount" }
+                        }
+                    }
+                    .onCompletion { cause ->
+                        locationDebugLogger.i {
+                            "[$sessionId] currentLocation flow completed: cause=${cause?.message ?: "normal"} " +
+                                "emissionCount=$emissionCount"
+                        }
+                    },
+            )
+        }.map { it }.stateInWhileSubscribed(initialValue = null)
 
     init {
         val contactKey = savedStateHandle.get<String>("contactKey")

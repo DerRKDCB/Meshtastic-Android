@@ -14,6 +14,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+@file:Suppress("unused")
+
 package org.meshtastic.core.common
 
 import android.Manifest
@@ -32,6 +34,7 @@ object ContextServices {
 }
 
 /** Checks if the device has a GPS receiver. */
+@Suppress("unused")
 fun Context.hasGps(): Boolean {
     val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
     return lm?.allProviders?.contains(LocationManager.GPS_PROVIDER) == true
@@ -75,10 +78,15 @@ private fun Context.getBluetoothPermissions(): Array<String> {
 /** Checks if all necessary Bluetooth permissions have been granted. */
 fun Context.hasBluetoothPermission(): Boolean = getBluetoothPermissions().isEmpty()
 
-/** @return true if the user already has location permission (ACCESS_FINE_LOCATION). */
+/** @return true if the user already has at least one location permission (fine or coarse). */
 fun Context.hasLocationPermission(): Boolean {
-    val perms = listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-    return perms.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+    val fineGranted =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+    val coarseGranted =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+    return fineGranted || coarseGranted
 }
 
 /**

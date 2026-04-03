@@ -21,7 +21,6 @@ package org.meshtastic.feature.messaging
 import android.Manifest
 import android.content.Intent
 import android.content.ClipData
-import android.graphics.Bitmap
 import android.location.Location
 import android.net.Uri
 import android.content.pm.PackageManager
@@ -84,13 +83,14 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
+import co.touchlab.kermit.Logger
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
+import org.meshtastic.core.common.hasLocationPermission
 import org.meshtastic.core.common.util.HomoglyphCharacterStringTransformer
 import org.meshtastic.core.model.Channel
 import org.meshtastic.core.database.entity.QuickChatAction
 import org.meshtastic.core.model.DataPacket
-import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.util.getChannel
 import org.meshtastic.proto.Config
@@ -124,6 +124,7 @@ import java.nio.charset.StandardCharsets
 
 private const val ROUNDED_CORNER_PERCENT = 100
 private const val MAX_LINES = 3
+private val locationUiLogger = Logger.withTag("MsgLocationDebug")
 
 /**
  * The main screen for displaying and sending messages to a contact or channel.
@@ -296,12 +297,27 @@ fun MessageScreen(
     if (showDeleteDialog) {
         DeleteMessageDialog(
             count = selectedMessageIds.value.size,
-            onConfirm = { onEvent(MessageScreenEvent.DeleteMessages(selectedMessageIds.value.toList())) },
-            onDismiss = { showDeleteDialog = false },
+            onConfirm = { 
+                onEvent(MessageScreenEvent.DeleteMessages(selectedMessageIds.value.toList()))
+                @Suppress("UnusedAssignment")
+                showDeleteDialog = false
+            },
+            onDismiss = { 
+                @Suppress("UnusedAssignment")
+                showDeleteDialog = false
+            },
         )
     }
 
-    sharedContact?.let { contact -> SharedContactDialog(contact = contact, onDismiss = { sharedContact = null }) }
+    sharedContact?.let { contact -> 
+        SharedContactDialog(
+            contact = contact, 
+            onDismiss = { 
+                @Suppress("UnusedAssignment")
+                sharedContact = null
+            }
+        ) 
+    }
 
     val originalMessage by
         remember(replyingToPacketId, pagedMessages.itemCount) {
@@ -476,11 +492,11 @@ private fun handleQuickChatAction(
 @Composable
 private fun MessageInput(
     isEnabled: Boolean,
-    isSendingChunks: Boolean = false,
     isHomoglyphEncodingEnabled: Boolean,
     loraConfig: Config.LoRaConfig,
     textFieldState: TextFieldState,
     modifier: Modifier = Modifier,
+    isSendingChunks: Boolean = false,
     maxByteSize: Int = MESSAGE_CHARACTER_LIMIT_BYTES,
     onSendMessage: () -> Unit,
     viewModel: MessageViewModel?,
@@ -490,31 +506,40 @@ private fun MessageInput(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val currentTextRaw = textFieldState.text.toString()
+    var showAttachmentMenu by remember { mutableStateOf(false) }
+    var showPositionDialog by remember { mutableStateOf(false) }
 
     var hasLocationPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
-                PackageManager.PERMISSION_GRANTED,
-        )
+        mutableStateOf(context.hasLocationPermission())
     }
     var openSettingsOnPermissionDenied by remember { mutableStateOf(false) }
 
-    fun refreshLocationPermissionState() {
-        hasLocationPermission =
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
-                PackageManager.PERMISSION_GRANTED
+    fun refreshLocationPermissionState(reason: String) {
+        val previousPermission = hasLocationPermission
+        hasLocationPermission = context.hasLocationPermission()
+        locationUiLogger.i {
+            "refreshLocationPermissionState reason=$reason previous=$previousPermission " +
+                "current=$hasLocationPermission showPositionDialog=$showPositionDialog"
+        }
     }
 
     val appSettingsLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            refreshLocationPermissionState()
+            locationUiLogger.i {
+                "Returned from app settings. showPositionDialog=$showPositionDialog " +
+                    "openSettingsOnPermissionDenied=$openSettingsOnPermissionDenied"
+            }
+            refreshLocationPermissionState(reason = "app_settings_result")
         }
 
     DisposableEffect(lifecycleOwner) {
         val observer =
             LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_RESUME) {
-                    refreshLocationPermissionState()
+                    locationUiLogger.i {
+                        "Lifecycle ON_RESUME observed in MessageInput. showPositionDialog=$showPositionDialog"
+                    }
+                    refreshLocationPermissionState(reason = "lifecycle_on_resume")
                 }
             }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -522,6 +547,9 @@ private fun MessageInput(
     }
 
     fun openAppSettingsForLocation() {
+        locationUiLogger.w {
+            "Opening app settings for location permission management. hasLocationPermission=$hasLocationPermission"
+        }
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = AndroidUri.fromParts("package", context.packageName, null)
         }
@@ -530,20 +558,39 @@ private fun MessageInput(
 
     fun isLocationPermissionPermanentlyDenied(): Boolean {
         val activity = context.findActivity() ?: return false
-        val isDenied =
+        val fineDenied =
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) !=
                 PackageManager.PERMISSION_GRANTED
-        val shouldShowRationale =
+        val coarseDenied =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) !=
+                PackageManager.PERMISSION_GRANTED
+        val fineRationale =
             ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_FINE_LOCATION)
-        return isDenied && !shouldShowRationale
+        val coarseRationale =
+            ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.ACCESS_COARSE_LOCATION)
+        val permanentlyDenied = fineDenied && coarseDenied && !fineRationale && !coarseRationale
+        locationUiLogger.i {
+            "isLocationPermissionPermanentlyDenied: permanentlyDenied=$permanentlyDenied " +
+                "fineDenied=$fineDenied coarseDenied=$coarseDenied " +
+                "fineRationale=$fineRationale coarseRationale=$coarseRationale"
+        }
+        return permanentlyDenied
     }
 
     val locationPermissionLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-            hasLocationPermission = isGranted
-            if (!isGranted && openSettingsOnPermissionDenied) {
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grantResults ->
+            val previousPermission = hasLocationPermission
+            hasLocationPermission = grantResults.any { (_, granted) -> granted } || context.hasLocationPermission()
+            locationUiLogger.i {
+                "Permission launcher callback: grantResults=$grantResults previousHasLocationPermission=$previousPermission " +
+                    "finalHasLocationPermission=$hasLocationPermission openSettingsOnPermissionDenied=$openSettingsOnPermissionDenied"
+            }
+            if (!hasLocationPermission && openSettingsOnPermissionDenied) {
                 if (isLocationPermissionPermanentlyDenied()) {
+                    locationUiLogger.w { "Permission denied and permanently denied. Redirecting to app settings." }
                     openAppSettingsForLocation()
+                } else {
+                    locationUiLogger.i { "Permission denied but not permanently denied. Staying in-app." }
                 }
             }
             openSettingsOnPermissionDenied = false
@@ -565,15 +612,27 @@ private fun MessageInput(
     val isOverLimit = currentByteLength > maxByteSize
     val canSend = !isOverLimit && currentText.isNotEmpty() && isEnabled
 
-    var showAttachmentMenu by remember { mutableStateOf(false) }
-    var showPositionDialog by remember { mutableStateOf(false) }
-
     val currentLocation by
         if (showPositionDialog && hasLocationPermission && viewModel != null) {
             viewModel.currentLocation.collectAsStateWithLifecycle(initialValue = null)
         } else {
             remember { mutableStateOf<Location?>(null) }
         }
+
+    LaunchedEffect(showPositionDialog, hasLocationPermission) {
+        locationUiLogger.i {
+            "Position dialog state changed: showPositionDialog=$showPositionDialog hasLocationPermission=$hasLocationPermission"
+        }
+    }
+
+    LaunchedEffect(showPositionDialog, currentLocation) {
+        if (showPositionDialog) {
+            locationUiLogger.i {
+                "Current location update while dialog visible: hasLocation=${currentLocation != null} " +
+                    "lat=${currentLocation?.latitude} lon=${currentLocation?.longitude}"
+            }
+        }
+    }
 
     LaunchedEffect(isEnabled, isSendingChunks) {
         if (!isEnabled && !isSendingChunks) {
@@ -666,36 +725,35 @@ private fun MessageInput(
         if (isSendingChunks) {
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.cancel)) },
-                onClick = {
-                    showAttachmentMenu = false
-                    onStopSendingChunks()
-                }
+                onClick = { onStopSendingChunks() }
             )
         } else {
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.attach_image)) },
-                onClick = {
-                    showAttachmentMenu = false
-                    imagePickerLauncher.launch("image/*")
-                }
+                onClick = { imagePickerLauncher.launch("image/*") }
             )
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.position)) },
                 onClick = {
-                    showAttachmentMenu = false
+                    locationUiLogger.i {
+                        "Position menu clicked. hasLocationPermission=$hasLocationPermission " +
+                            "showPositionDialog=$showPositionDialog"
+                    }
                     if (!hasLocationPermission) {
-                        openSettingsOnPermissionDenied = false
-                        locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                        locationUiLogger.i { "Position menu branch=request_permission_then_show_dialog" }
+                        locationPermissionLauncher.launch(
+                            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                        )
+                    } else {
+                        locationUiLogger.i { "Position menu branch=permission_already_granted_show_dialog" }
                     }
                     showPositionDialog = true
+                    locationUiLogger.i { "Position dialog opened from menu." }
                 }
             )
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.attach_file)) },
-                onClick = {
-                    showAttachmentMenu = false
-                    filePickerLauncher.launch("*/*")
-                }
+                onClick = { filePickerLauncher.launch("*/*") }
             )
         }
     }
@@ -705,7 +763,6 @@ private fun MessageInput(
             fileUri = uri,
             loraConfig = loraConfig,
             onSend = { chunks, delayMillis ->
-                selectedFileUri = null
                 if (viewModel != null) {
                     viewModel.sendChunkedPayloadChunks(
                         chunks = chunks,
@@ -713,6 +770,7 @@ private fun MessageInput(
                         delayMillis = delayMillis,
                     )
                 }
+                selectedFileUri = null
             },
             onCancel = { selectedFileUri = null },
         )
@@ -724,14 +782,26 @@ private fun MessageInput(
             canUseCurrentLocation = hasLocationPermission,
             onRequestCurrentLocationPermission = {
                 openSettingsOnPermissionDenied = true
-                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                locationUiLogger.i {
+                    "Position dialog requested location permission. openSettingsOnPermissionDenied=true " +
+                        "hasLocationPermission=$hasLocationPermission"
+                }
+                locationPermissionLauncher.launch(
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                )
             },
             onSend = { payloadBytes ->
+                locationUiLogger.i {
+                    "Position dialog send pressed. payloadSize=${payloadBytes.size} hasCurrentLocation=${currentLocation != null}"
+                }
                 if (viewModel != null) {
                     viewModel.sendPrivateAppPayload(payload = payloadBytes, contactKey = contactKey)
                 }
             },
-            onCancel = { showPositionDialog = false },
+            onCancel = {
+                locationUiLogger.i { "Position dialog dismissed." }
+                showPositionDialog = false
+            },
         )
     }
 
@@ -749,7 +819,6 @@ private fun MessageInput(
                     it.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, maxDutyCyclePercentForRegion(loraConfig.region))
             },
             onSend = { chunks, delayMillis ->
-                selectedImageUri = null
                 if (viewModel != null) {
                     viewModel.sendChunkedPayloadChunks(
                         chunks = chunks,
@@ -757,6 +826,7 @@ private fun MessageInput(
                         delayMillis = delayMillis,
                     )
                 }
+                selectedImageUri = null
             },
             onCancel = {
                 selectedImageUri = null
