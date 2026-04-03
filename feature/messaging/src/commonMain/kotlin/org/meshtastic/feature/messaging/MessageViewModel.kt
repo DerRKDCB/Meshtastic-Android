@@ -16,7 +16,6 @@
  */
 package org.meshtastic.feature.messaging
 
-import co.touchlab.kermit.Logger
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -28,7 +27,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -36,9 +34,6 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.koin.core.annotation.KoinViewModel
@@ -79,8 +74,6 @@ class MessageViewModel(
     private val meshServiceNotifications: MeshServiceNotifications,
     private val sendMessageUseCase: SendMessageUseCase,
 ) : ViewModel() {
-    private val locationDebugLogger = Logger.withTag("MsgLocationDebug")
-
     private val _title = MutableStateFlow("")
     val title: StateFlow<String> = _title.asStateFlow()
 
@@ -177,33 +170,7 @@ class MessageViewModel(
             }
             .stateInWhileSubscribed(emptyList())
 
-    val currentLocation: StateFlow<Location?> =
-        flow {
-            val sessionId = "vm-${System.identityHashCode(this@MessageViewModel)}-${System.nanoTime()}"
-            var emissionCount = 0
-            locationDebugLogger.i { "[$sessionId] currentLocation flow setup" }
-            emitAll(
-                locationRepository
-                    .getLocations()
-                    .onStart {
-                        locationDebugLogger.i { "[$sessionId] currentLocation subscription started" }
-                    }
-                    .onEach { location ->
-                        emissionCount += 1
-                        if (emissionCount == 1) {
-                            locationDebugLogger.i { "[$sessionId] first currentLocation emission: $location" }
-                        } else {
-                            locationDebugLogger.v { "[$sessionId] currentLocation emission #$emissionCount" }
-                        }
-                    }
-                    .onCompletion { cause ->
-                        locationDebugLogger.i {
-                            "[$sessionId] currentLocation flow completed: cause=${cause?.message ?: "normal"} " +
-                                "emissionCount=$emissionCount"
-                        }
-                    },
-            )
-        }.map { it }.stateInWhileSubscribed(initialValue = null)
+    val currentLocation: StateFlow<Location?> = locationRepository.getLocations().stateInWhileSubscribed(initialValue = null)
 
     init {
         val contactKey = savedStateHandle.get<String>("contactKey")
