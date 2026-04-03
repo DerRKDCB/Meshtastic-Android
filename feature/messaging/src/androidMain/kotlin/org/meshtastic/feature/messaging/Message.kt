@@ -104,7 +104,6 @@ import org.meshtastic.core.resources.send
 import org.meshtastic.core.resources.type_a_message
 import org.meshtastic.core.resources.unknown_channel
 import org.meshtastic.core.resources.attachment
-import org.meshtastic.core.ui.component.SharedContactDialog
 import org.meshtastic.core.ui.component.smartScrollToIndex
 import org.meshtastic.core.ui.theme.AppTheme
 import org.meshtastic.core.ui.util.findActivity
@@ -164,7 +163,6 @@ fun MessageScreen(
     // UI State managed within this Composable
     var replyingToPacketId by rememberSaveable { mutableStateOf<Int?>(null) }
     var showDeleteDialog by rememberSaveable { mutableStateOf(false) }
-    var sharedContact by rememberSaveable { mutableStateOf<Node?>(null) }
     val selectedMessageIds = rememberSaveable { mutableStateOf(emptySet<Long>()) }
     val messageInputState = rememberTextFieldState(message)
     val showQuickChat by viewModel.showQuickChat.collectAsStateWithLifecycle()
@@ -174,6 +172,14 @@ fun MessageScreen(
 
     // Prevent the message TextField from stealing focus when the screen opens
     LaunchedEffect(contactKey) { focusManager.clearFocus() }
+
+    fun showDeleteConfirmation() {
+        showDeleteDialog = true
+    }
+
+    fun dismissDeleteConfirmation() {
+        showDeleteDialog = false
+    }
 
     // Derived state, memoized for performance
     val channelInfo =
@@ -297,26 +303,11 @@ fun MessageScreen(
     if (showDeleteDialog) {
         DeleteMessageDialog(
             count = selectedMessageIds.value.size,
-            onConfirm = { 
+            onConfirm = {
                 onEvent(MessageScreenEvent.DeleteMessages(selectedMessageIds.value.toList()))
-                @Suppress("UnusedAssignment")
-                showDeleteDialog = false
             },
-            onDismiss = { 
-                @Suppress("UnusedAssignment")
-                showDeleteDialog = false
-            },
+            onDismiss = ::dismissDeleteConfirmation,
         )
-    }
-
-    sharedContact?.let { contact -> 
-        SharedContactDialog(
-            contact = contact, 
-            onDismiss = { 
-                @Suppress("UnusedAssignment")
-                sharedContact = null
-            }
-        ) 
     }
 
     val originalMessage by
@@ -343,7 +334,7 @@ fun MessageScreen(
                                 onEvent(MessageScreenEvent.CopyToClipboard(copiedText))
                             }
 
-                            MessageMenuAction.Delete -> showDeleteDialog = true
+                            MessageMenuAction.Delete -> showDeleteConfirmation()
                             MessageMenuAction.Dismiss -> selectedMessageIds.value = emptySet()
                             MessageMenuAction.SelectAll -> {
                                 // Note: Select All is disabled with pagination since we don't have
@@ -643,12 +634,29 @@ private fun MessageInput(
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
 
-    var selectedSize by remember { mutableStateOf(32) }
-    var selectedMaxTransmissionTimeSeconds by remember { mutableStateOf(0f) }
-    var selectedDutyCyclePercent by remember {
-        mutableStateOf(
-            DEFAULT_IMAGE_DUTY_CYCLE_PERCENT.coerceAtMost(maxDutyCyclePercentForRegion(loraConfig.region))
-        )
+    fun openAttachmentMenu() {
+        showAttachmentMenu = true
+    }
+
+    fun dismissAttachmentMenu() {
+        showAttachmentMenu = false
+    }
+
+    fun openPositionDialog() {
+        showPositionDialog = true
+    }
+
+    fun dismissPositionDialog() {
+        locationUiLogger.i { "Position dialog dismissed." }
+        showPositionDialog = false
+    }
+
+    fun clearSelectedImage() {
+        selectedImageUri = null
+    }
+
+    fun clearSelectedFile() {
+        selectedFileUri = null
     }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -668,14 +676,14 @@ private fun MessageInput(
         placeholder = { Text(stringResource(Res.string.type_a_message)) },
         leadingIcon = {
             if (isSendingChunks) {
-                IconButton(onClick = { showAttachmentMenu = true }, enabled = true) {
+                IconButton(onClick = ::openAttachmentMenu, enabled = true) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                 }
             } else {
                 IconButton(
                     onClick = {
                         if (isEnabled) {
-                            showAttachmentMenu = true
+                            openAttachmentMenu()
                         }
                     },
                     enabled = isEnabled,
@@ -720,21 +728,28 @@ private fun MessageInput(
 
     DropdownMenu(
         expanded = showAttachmentMenu && (isEnabled || isSendingChunks),
-        onDismissRequest = { showAttachmentMenu = false }
+        onDismissRequest = ::dismissAttachmentMenu
     ) {
         if (isSendingChunks) {
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.cancel)) },
-                onClick = { onStopSendingChunks() }
+                onClick = {
+                    dismissAttachmentMenu()
+                    onStopSendingChunks()
+                }
             )
         } else {
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.attach_image)) },
-                onClick = { imagePickerLauncher.launch("image/*") }
+                onClick = {
+                    dismissAttachmentMenu()
+                    imagePickerLauncher.launch("image/*")
+                }
             )
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.position)) },
                 onClick = {
+                    dismissAttachmentMenu()
                     locationUiLogger.i {
                         "Position menu clicked. hasLocationPermission=$hasLocationPermission " +
                             "showPositionDialog=$showPositionDialog"
@@ -747,13 +762,16 @@ private fun MessageInput(
                     } else {
                         locationUiLogger.i { "Position menu branch=permission_already_granted_show_dialog" }
                     }
-                    showPositionDialog = true
+                    openPositionDialog()
                     locationUiLogger.i { "Position dialog opened from menu." }
                 }
             )
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.attach_file)) },
-                onClick = { filePickerLauncher.launch("*/*") }
+                onClick = {
+                    dismissAttachmentMenu()
+                    filePickerLauncher.launch("*/*")
+                }
             )
         }
     }
@@ -770,9 +788,9 @@ private fun MessageInput(
                         delayMillis = delayMillis,
                     )
                 }
-                selectedFileUri = null
+                clearSelectedFile()
             },
-            onCancel = { selectedFileUri = null },
+            onCancel = ::clearSelectedFile,
         )
     }
 
@@ -798,10 +816,7 @@ private fun MessageInput(
                     viewModel.sendPrivateAppPayload(payload = payloadBytes, contactKey = contactKey)
                 }
             },
-            onCancel = {
-                locationUiLogger.i { "Position dialog dismissed." }
-                showPositionDialog = false
-            },
+            onCancel = ::dismissPositionDialog,
         )
     }
 
@@ -809,15 +824,6 @@ private fun MessageInput(
         ImageAdjustmentDialog(
             imageUri = uri,
             loraConfig = loraConfig,
-            selectedSize = selectedSize,
-            selectedMaxTransmissionTimeSeconds = selectedMaxTransmissionTimeSeconds,
-            selectedDutyCyclePercent = selectedDutyCyclePercent,
-            onSizeChange = { selectedSize = it },
-            onMaxTransmissionTimeChange = { selectedMaxTransmissionTimeSeconds = it },
-            onDutyCycleChange = {
-                selectedDutyCyclePercent =
-                    it.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, maxDutyCyclePercentForRegion(loraConfig.region))
-            },
             onSend = { chunks, delayMillis ->
                 if (viewModel != null) {
                     viewModel.sendChunkedPayloadChunks(
@@ -826,11 +832,9 @@ private fun MessageInput(
                         delayMillis = delayMillis,
                     )
                 }
-                selectedImageUri = null
+                clearSelectedImage()
             },
-            onCancel = {
-                selectedImageUri = null
-            }
+            onCancel = ::clearSelectedImage,
         )
     }
 }

@@ -21,6 +21,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.text.format.Formatter
 import android.text.format.DateUtils
+import androidx.core.graphics.scale
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -43,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -80,17 +82,16 @@ import kotlin.math.roundToInt
 internal fun ImageAdjustmentDialog(
     imageUri: Uri,
     loraConfig: Config.LoRaConfig,
-    selectedSize: Int,
-    selectedMaxTransmissionTimeSeconds: Float,
-    selectedDutyCyclePercent: Float,
-    onSizeChange: (Int) -> Unit,
-    onMaxTransmissionTimeChange: (Float) -> Unit,
-    onDutyCycleChange: (Float) -> Unit,
     onSend: (List<ByteArray>, Int) -> Unit,
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
     val sizes = listOf(32, 64, 128, 256, 512)
+    var selectedSize by remember(imageUri) { mutableStateOf(32) }
+    var selectedMaxTransmissionTimeSeconds by remember(imageUri) { mutableStateOf(0f) }
+    val selectedDutyCyclePercentState = remember(imageUri, loraConfig.region) {
+        mutableFloatStateOf(DEFAULT_IMAGE_DUTY_CYCLE_PERCENT.coerceAtMost(maxDutyCyclePercentForRegion(loraConfig.region)))
+    }
     var scaledBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var selectedJpegQuality by remember { mutableStateOf(0) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -100,9 +101,22 @@ internal fun ImageAdjustmentDialog(
     var scaledBitmapRequestId by remember(imageUri) { mutableStateOf(0) }
     var previewComputationRequestId by remember(imageUri) { mutableStateOf(0) }
     val regionMaxDutyCyclePercent = maxDutyCyclePercentForRegion(loraConfig.region)
-    val boundedDutyCyclePercent = selectedDutyCyclePercent.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, regionMaxDutyCyclePercent)
+    val boundedDutyCyclePercent =
+        selectedDutyCyclePercentState.floatValue.coerceIn(MIN_IMAGE_DUTY_CYCLE_PERCENT, regionMaxDutyCyclePercent)
     var minTransmissionSeconds by remember { mutableStateOf(0f) }
     var maxTransmissionSeconds by remember { mutableStateOf(0f) }
+
+    fun updateSelectedSize(size: Int) {
+        selectedSize = size
+    }
+
+    fun updateSelectedMaxTransmissionTime(seconds: Float) {
+        selectedMaxTransmissionTimeSeconds = seconds
+    }
+
+    fun updateSelectedDutyCyclePercent(value: Float) {
+        selectedDutyCyclePercentState.floatValue = value
+    }
 
     val selectedChunkDelayMillis =
         interChunkDelayMillisForDutyCycle(
@@ -180,7 +194,7 @@ internal fun ImageAdjustmentDialog(
                             val ratio = minOf(selectedSize.toFloat() / it.width, selectedSize.toFloat() / it.height)
                             val newWidth = (it.width * ratio).toInt()
                             val newHeight = (it.height * ratio).toInt()
-                            Bitmap.createScaledBitmap(it, newWidth, newHeight, true)
+                            it.scale(newWidth, newHeight, true)
                         }
                     }
                 }
@@ -293,7 +307,7 @@ internal fun ImageAdjustmentDialog(
             maxTransmissionSeconds = result.maxSeconds
 
             if (selectedMaxTransmissionTimeSeconds != result.snappedSelectedSeconds) {
-                onMaxTransmissionTimeChange(result.snappedSelectedSeconds)
+                updateSelectedMaxTransmissionTime(result.snappedSelectedSeconds)
             }
 
             selectedJpegQuality = result.bestQuality
@@ -340,9 +354,7 @@ internal fun ImageAdjustmentDialog(
                 )
                 Slider(
                     value = boundedDutyCyclePercent,
-                    onValueChange = { value ->
-                        onDutyCycleChange(value)
-                    },
+                    onValueChange = ::updateSelectedDutyCyclePercent,
                     valueRange = MIN_IMAGE_DUTY_CYCLE_PERCENT..regionMaxDutyCyclePercent,
                 )
 
@@ -355,14 +367,14 @@ internal fun ImageAdjustmentDialog(
                     sizes.forEach { size ->
                         if (selectedSize == size) {
                             Button(
-                                onClick = { onSizeChange(size) },
+                                onClick = { updateSelectedSize(size) },
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text("$size px", textAlign = TextAlign.Center)
                             }
                         } else {
                             OutlinedButton(
-                                onClick = { onSizeChange(size) },
+                                onClick = { updateSelectedSize(size) },
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text("$size px", textAlign = TextAlign.Center)
@@ -383,7 +395,7 @@ internal fun ImageAdjustmentDialog(
                     Slider(
                         value = selectedTransmissionSliderPosition,
                         onValueChange = { value ->
-                            onMaxTransmissionTimeChange(
+                            updateSelectedMaxTransmissionTime(
                                 transmissionSecondsFromSliderPosition(
                                     snapTransmissionSliderPosition(value),
                                     minTransmissionSeconds,

@@ -42,7 +42,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -58,15 +57,13 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.stringResource
@@ -109,7 +106,6 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
-import java.util.Locale
 
 private const val MAX_FILE_SIZE_BYTES = 10L * 1024L * 1024L
 private const val MAX_COMPRESSED_FILE_SIZE_BYTES = 1L * 1024L * 1024L
@@ -337,12 +333,22 @@ internal fun PositionShareDialog(
     var longitudeState by rememberSaveable { mutableStateOf(currentLocation?.longitude?.toString().orEmpty()) }
     var hasSeededInitialLocation by remember { mutableStateOf(false) }
     var hasSelectedMapLocation by rememberSaveable { mutableStateOf(false) }
+    var isTrackingCurrentLocation by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(currentLocation) {
         if (!hasSeededInitialLocation && currentLocation != null) {
             latitudeState = currentLocation.latitude.toString()
             longitudeState = currentLocation.longitude.toString()
             hasSeededInitialLocation = true
+        }
+    }
+
+    LaunchedEffect(currentLocation, isTrackingCurrentLocation) {
+        if (isTrackingCurrentLocation && currentLocation != null) {
+            latitudeState = currentLocation.latitude.toString()
+            longitudeState = currentLocation.longitude.toString()
+            hasSeededInitialLocation = true
+            hasSelectedMapLocation = false
         }
     }
 
@@ -363,16 +369,21 @@ internal fun PositionShareDialog(
         text = {
             Column {
                 PositionPickerMap(
+                    modifier = Modifier,
                     latitude = selectedLatitude,
                     longitude = selectedLongitude,
                     initialZoomLevel = initialZoomLevel,
                     seedCoordinates = currentLocation != null || (parsedLatitude != null && parsedLongitude != null),
+                    isTrackingCurrentLocation = isTrackingCurrentLocation,
                     onCoordinatesSelected = { latitude, longitude ->
                         latitudeState = latitude.toString()
                         longitudeState = longitude.toString()
                     },
                     onMapSelectionConfirmed = { _, _ ->
                         hasSelectedMapLocation = true
+                    },
+                    onUserMovedMap = {
+                        isTrackingCurrentLocation = false
                     },
                 )
                 Row(
@@ -414,6 +425,7 @@ internal fun PositionShareDialog(
                         if (!canUseCurrentLocation) {
                             onRequestCurrentLocationPermission()
                         } else {
+                            isTrackingCurrentLocation = true
                             currentLocation?.let { location ->
                                 latitudeState = location.latitude.toString()
                                 longitudeState = location.longitude.toString()
@@ -462,16 +474,21 @@ internal fun PositionShareDialog(
 
 @Composable
 private fun PositionPickerMap(
+    modifier: Modifier = Modifier,
     latitude: Double,
     longitude: Double,
     initialZoomLevel: Double,
     seedCoordinates: Boolean,
+    isTrackingCurrentLocation: Boolean,
     onCoordinatesSelected: (Double, Double) -> Unit,
     onMapSelectionConfirmed: (Double, Double) -> Unit,
-    modifier: Modifier = Modifier,
+    onUserMovedMap: () -> Unit,
 ) {
     val context = LocalContext.current
     val latestOnCoordinatesSelected by rememberUpdatedState(onCoordinatesSelected)
+    val latestOnMapSelectionConfirmed by rememberUpdatedState(onMapSelectionConfirmed)
+    val latestOnUserMovedMap by rememberUpdatedState(onUserMovedMap)
+    var userDraggedMap by remember { mutableStateOf(false) }
     val mapView = remember {
         MapView(context).apply {
             Configuration.getInstance().userAgentValue = context.packageName
@@ -487,10 +504,10 @@ private fun PositionPickerMap(
     fun updateSelectedPosition() {
         val center = mapView.projection.currentCenter
         latestOnCoordinatesSelected(center.latitude, center.longitude)
-        onMapSelectionConfirmed(center.latitude, center.longitude)
+        latestOnMapSelectionConfirmed(center.latitude, center.longitude)
     }
 
-    LaunchedEffect(latitude, longitude) {
+    LaunchedEffect(latitude, longitude, isTrackingCurrentLocation) {
         val geoPoint = GeoPoint(latitude, longitude)
         mapView.controller.setCenter(geoPoint)
         if (seedCoordinates) {
@@ -525,6 +542,16 @@ private fun PositionPickerMap(
                         latestOnCoordinatesSelected(latitude, longitude)
                     }
                     setOnTouchListener { _, event ->
+                        when (event.actionMasked) {
+                            MotionEvent.ACTION_MOVE -> userDraggedMap = true
+                            MotionEvent.ACTION_UP,
+                            MotionEvent.ACTION_CANCEL -> {
+                                if (userDraggedMap) {
+                                    latestOnUserMovedMap()
+                                }
+                                userDraggedMap = false
+                            }
+                        }
                         if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
                             updateSelectedPosition()
                         }
