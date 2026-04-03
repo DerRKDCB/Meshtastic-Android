@@ -59,31 +59,3 @@ kevinh@kevin-server:~/development$ adb shell 'logcat --pid=$(pidof -s com.geeksv
 03-07 17:10:06.609 13452 13452 D com.geeksville.mesh.ui.AnalyticsLog: logging screen view messages
 
 ```
-
-## Location permission regression trace (messaging position share)
-
-Use this focused capture when debugging the messaging -> position flow after users change app permissions in Android system settings.
-
-```bash
-adb logcat -c
-adb logcat -v time -s MsgLocationDebug:V '*:S'
-```
-
-Expected high-level event order:
-
-1. `MsgLocationDebug`: UI resumes (`ON_RESUME`) and refreshes permission state.
-2. `MsgLocationDebug`: position action branch (`request_permission` or `permission_already_granted`).
-3. `MsgLocationDebug`: position dialog opens and starts collecting `currentLocation`.
-4. `MsgLocationDebug`: first location update is observed while the dialog is visible.
-
-Scenario matrix to run before sharing logs:
-
-| Scenario | In-app action | System settings action | Return path | Expected key logs |
-| --- | --- | --- | --- | --- |
-| Grant on request | Tap Position -> Allow | None | N/A | permission callback granted -> position dialog open -> first location update |
-| Deny once | Tap Position -> Deny | None | N/A | permission callback denied, not permanently denied, no location update |
-| Don't ask again | Tap Position -> Deny + don't ask again | None | N/A | permanently denied check true -> open app settings intent |
-| Re-enable in settings | Start from denied/permanent state | Enable location permission for app | Back/Recents to app | ON_RESUME refresh shows granted -> position dialog open -> first location update |
-| Revoke in settings | Start from granted state | Disable location permission for app | Back/Recents to app | ON_RESUME refresh shows denied -> no location update |
-
-When filing an issue, include which matrix row failed and the first log line where actual order diverges.

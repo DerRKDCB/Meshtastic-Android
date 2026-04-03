@@ -248,7 +248,6 @@ fun MessageItem(
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = {
-                    println("Long click on message: ${message.text.take(50)}...")
                     onLongClick()
                     if (!inSelectionMode) {
                         activeSheet = ActiveSheet.Actions

@@ -46,5 +46,4 @@ internal sealed interface MessageScreenEvent {
 
     /** Copy the given text to the clipboard. */
     data class CopyToClipboard(val text: String) : MessageScreenEvent
-
 }

@@ -30,6 +30,7 @@ import androidx.core.location.LocationListenerCompat
 import androidx.core.location.LocationManagerCompat
 import androidx.core.location.LocationRequestCompat
 import androidx.core.location.altitude.AltitudeConverterCompat
+import co.touchlab.kermit.Logger
 import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -88,7 +89,9 @@ class LocationRepositoryImpl(
                 @Suppress("TooGenericExceptionCaught")
                 try {
                     AltitudeConverterCompat.addMslAltitudeToLocation(context, location)
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Logger.e(e) { "addMslAltitudeToLocation() failed" }
+                }
             }
             trySend(location)
         }
@@ -112,6 +115,11 @@ class LocationRepositoryImpl(
             trySend(lastKnownLocation)
         }
 
+        Logger.i {
+            "Starting location updates with $providerList intervalMs=$DEFAULT_INTERVAL_MS " +
+                "and minDistanceM=$MIN_DISTANCE_METERS"
+        }
+
         var startedLocationUpdates = false
 
         @Suppress("TooGenericExceptionCaught")
@@ -129,14 +137,17 @@ class LocationRepositoryImpl(
             _receivingLocationUpdates.value = true
             analytics.track("location_start")
         } catch (_: SecurityException) {
+            Logger.w { "Location updates failed due to SecurityException (permission revoked?)" }
             _receivingLocationUpdates.value = false
             close()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Logger.e(e) { "requestLocationUpdates() failed" }
             _receivingLocationUpdates.value = false
             close()
         }
 
         awaitClose {
+            Logger.i { "Stopping location requests" }
             _receivingLocationUpdates.value = false
             if (startedLocationUpdates) {
                 analytics.track("location_stop")

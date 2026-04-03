@@ -50,7 +50,7 @@ Meshtastic-Android is a Kotlin Multiplatform (KMP) application for off-grid, dec
 | `core/ble/` | Bluetooth Low Energy stack using Nordic libraries. |
 | `core/resources/` | Centralized string and image resources (Compose Multiplatform). |
 | `core/testing/` | **Shared test doubles, fakes, and utilities for `commonTest` across all KMP modules.** |
-| `feature/` | Feature modules (e.g., `settings`, `map`, `messaging`, `node`, `intro`, `connections`, `firmware`). All are KMP with `jvm()` target. |
+| `feature/` | Feature modules (e.g., `settings`, `map`, `messaging`, `node`, `intro`, `connections`). All are KMP with `jvm()` target. |
 | `desktop/` | Compose Desktop application — first non-Android KMP target. Nav 3 shell, full Koin DI graph, TCP transport with `want_config` handshake. |
 | `mesh_service_example/` | Sample app showing `core:api` service integration. |
 
@@ -70,12 +70,12 @@ Meshtastic-Android is a Kotlin Multiplatform (KMP) application for off-grid, dec
     -   `java.util.concurrent.locks.*` → `kotlinx.coroutines.sync.Mutex`.
     -   `java.io.*` → Okio (`BufferedSource`/`BufferedSink`).
 -   **Concurrency:** Use Kotlin Coroutines and Flow.
--   **Dependency Injection:** Use **Koin Annotations** with the K2 compiler plugin (0.4.0+). Keep root graph assembly in `app` and `desktop`.
+-   **Dependency Injection:** Use **Koin Annotations** with the K2 compiler plugin (0.4.0+). Keep root graph assembly in `app`.
 -   **ViewModels:** Follow the MVI/UDF pattern. Use the multiplatform `androidx.lifecycle.ViewModel` in `commonMain`.
 -   **BLE:** All Bluetooth communication must route through `core:ble` using Nordic Semiconductor's Android Common Libraries.
 -   **Dependencies:** Check `gradle/libs.versions.toml` before assuming a library is available.
 -   **JetBrains fork aliases:** Version catalog aliases for JetBrains-forked AndroidX artifacts use the `jetbrains-*` prefix (e.g., `jetbrains-lifecycle-runtime-compose`, `jetbrains-navigation3-ui`). Plain `androidx-*` aliases are true Google AndroidX artifacts. Never mix them up in `commonMain`.
--   **Compose Multiplatform:** Version catalog aliases for Compose Multiplatform artifacts use the `compose-multiplatform-*` prefix (e.g., `compose-multiplatform-material3`, `compose-multiplatform-foundation`). Never use plain `androidx.compose` dependencies in `commonMain`.
+-   **Compose Multiplatform:** Version catalog aliases for Compose Multiplatform artifacts use the `compose-multiplatform-*` prefix (e.g., `compose-multiplatform-material3`, `compose-multiplatform-foundation`). Never use plain `androidx.compose` dependencies in common Main.
 -   **Room KMP:** Always use `factory = { MeshtasticDatabaseConstructor.initialize() }` in `Room.databaseBuilder` and `inMemoryDatabaseBuilder`. DAOs and Entities reside in `commonMain`.
 -   **Testing:** Write ViewModel and business logic tests in `commonTest`. Use `core:testing` shared fakes.
 
@@ -110,12 +110,10 @@ Always run commands in the following order to ensure reliability. Do not attempt
 **Testing:**
 ```bash
 ./gradlew test                # Run local unit tests
-./gradlew testDebugUnitTest   # CI-aligned Android unit tests (default debug variant)
 ./gradlew testFdroidDebugUnitTest testGoogleDebugUnitTest # CI-aligned Android unit tests (flavor-explicit)
 ./gradlew connectedAndroidTest # Run instrumented tests
 ./gradlew testFdroidDebug testGoogleDebug # Flavor-specific unit tests
 ./gradlew lintFdroidDebug lintGoogleDebug # Flavor-specific lint checks
-./gradlew :desktop:test       # Desktop target tests (run when touching shared KMP paths used by desktop)
 ```
 *Note: If testing Compose UI on the JVM (Robolectric) with Java 17, pin your tests to `@Config(sdk = [34])` to avoid SDK 35 compatibility crashes.*
 
