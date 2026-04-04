@@ -93,7 +93,7 @@ private val locationUiLogger = Logger.withTag("MsgLocationDebug")
 
 @Suppress("LongMethod")
 @Composable
-internal fun MessageInput(
+internal fun MessageInputWithAttachments(
     isEnabled: Boolean,
     isHomoglyphEncodingEnabled: Boolean,
     loraConfig: Config.LoRaConfig,
@@ -447,60 +447,4 @@ internal fun MessageInput(
     }
 }
 
-@PreviewLightDark
-@Composable
-private fun MessageInputPreview() {
-    AppTheme {
-        Surface {
-            Column(modifier = Modifier.padding(8.dp)) {
-                val dummyContactKey = "preview"
-                MessageInput(
-                    isEnabled = true,
-                    isHomoglyphEncodingEnabled = false,
-                    loraConfig = Channel.default.loraConfig,
-                    textFieldState = rememberTextFieldState("Hello"),
-                    onSendMessage = {},
-                    viewModel = null,
-                    contactKey = dummyContactKey,
-                )
-                Spacer(Modifier.size(16.dp))
-                MessageInput(
-                    isEnabled = false,
-                    isHomoglyphEncodingEnabled = false,
-                    loraConfig = Channel.default.loraConfig,
-                    textFieldState = rememberTextFieldState("Disabled"),
-                    onSendMessage = {},
-                    viewModel = null,
-                    contactKey = dummyContactKey,
-                )
-                Spacer(Modifier.size(16.dp))
-                MessageInput(
-                    isEnabled = true,
-                    isHomoglyphEncodingEnabled = false,
-                    loraConfig = Channel.default.loraConfig,
-                    textFieldState =
-                        rememberTextFieldState(
-                            "A very long message that might exceed the byte limit " +
-                                "and cause an error state display for the user to see clearly.",
-                        ),
-                    onSendMessage = {},
-                    maxByteSize = 50,
-                    viewModel = null,
-                    contactKey = dummyContactKey,
-                )
-                Spacer(Modifier.size(16.dp))
-                MessageInput(
-                    isEnabled = true,
-                    isHomoglyphEncodingEnabled = false,
-                    loraConfig = Channel.default.loraConfig,
-                    textFieldState = rememberTextFieldState("こんにちは世界"),
-                    onSendMessage = {},
-                    maxByteSize = 10,
-                    viewModel = null,
-                    contactKey = dummyContactKey,
-                )
-            }
-        }
-    }
-}
 

@@ -118,8 +118,8 @@ class LocationRepositoryImpl(
             "Starting location updates with $providerList intervalMs=$DEFAULT_INTERVAL_MS " +
                 "and minDistanceM=$MIN_DISTANCE_METERS"
         }
-
-        var startedLocationUpdates = false
+        _receivingLocationUpdates.value = true
+        analytics.track("location_start")
 
         @Suppress("TooGenericExceptionCaught")
         try {
@@ -132,25 +132,19 @@ class LocationRepositoryImpl(
                     locationListener,
                 )
             }
-            startedLocationUpdates = true
-            _receivingLocationUpdates.value = true
-            analytics.track("location_start")
         } catch (_: SecurityException) {
             Logger.w { "Location updates failed due to SecurityException (permission revoked?)" }
             _receivingLocationUpdates.value = false
             close()
         } catch (e: Exception) {
-            Logger.e(e) { "requestLocationUpdates() failed" }
             _receivingLocationUpdates.value = false
-            close()
+            close(e)
         }
 
         awaitClose {
             Logger.i { "Stopping location requests" }
             _receivingLocationUpdates.value = false
-            if (startedLocationUpdates) {
-                analytics.track("location_stop")
-            }
+            analytics.track("location_stop")
 
             LocationManagerCompat.removeUpdates(this@requestLocationUpdates, locationListener)
         }

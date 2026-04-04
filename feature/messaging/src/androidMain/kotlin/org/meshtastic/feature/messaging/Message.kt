@@ -23,14 +23,17 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -43,6 +46,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -51,10 +56,13 @@ import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.model.Channel
 import org.meshtastic.core.database.entity.QuickChatAction
 import org.meshtastic.core.model.DataPacket
+import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.util.getChannel
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.unknown_channel
+import org.meshtastic.core.ui.component.SharedContactDialog
 import org.meshtastic.core.ui.component.smartScrollToIndex
+import org.meshtastic.core.ui.theme.AppTheme
 import org.meshtastic.feature.messaging.component.ActionModeTopBar
 import org.meshtastic.feature.messaging.component.DeleteMessageDialog
 import org.meshtastic.feature.messaging.component.MessageMenuAction
@@ -62,6 +70,10 @@ import org.meshtastic.feature.messaging.component.MessageTopBar
 import org.meshtastic.feature.messaging.component.QuickChatRow
 import org.meshtastic.feature.messaging.component.ReplySnippet
 import org.meshtastic.feature.messaging.component.ScrollToBottomFab
+import java.nio.charset.StandardCharsets
+
+private const val ROUNDED_CORNER_PERCENT = 100
+private const val MAX_LINES = 3
 
 /**
  * The main screen for displaying and sending messages to a contact or channel.
@@ -101,6 +113,7 @@ fun MessageScreen(
     // UI State managed within this Composable
     var replyingToPacketId by rememberSaveable { mutableStateOf<Int?>(null) }
     var showDeleteDialog by rememberSaveable { mutableStateOf(false) }
+    var sharedContact by rememberSaveable { mutableStateOf<Node?>(null) }
     val selectedMessageIds = rememberSaveable { mutableStateOf(emptySet<Long>()) }
     val messageInputState = rememberTextFieldState(message)
     val showQuickChat by viewModel.showQuickChat.collectAsStateWithLifecycle()
@@ -240,6 +253,8 @@ fun MessageScreen(
         )
     }
 
+    sharedContact?.let { contact -> SharedContactDialog(contact = contact, onDismiss = { sharedContact = null }) }
+
     val originalMessage by
         remember(replyingToPacketId, pagedMessages.itemCount) {
             derivedStateOf {
@@ -376,6 +391,105 @@ fun MessageScreen(
             // Show FAB if we can scroll towards the newest messages (index 0).
             if (listState.canScrollBackward) {
                 ScrollToBottomFab(coroutineScope, listState, unreadCount)
+            }
+        }
+    }
+}
+
+/**
+ * The text input field for composing messages.
+ *
+ * @param isEnabled Whether the input field should be enabled.
+ * @param textFieldState The [TextFieldState] managing the input's text.
+ * @param modifier The modifier for this composable.
+ * @param maxByteSize The maximum allowed size of the message in bytes.
+ * @param onSendMessage Callback invoked when the send button is pressed or send IME action is triggered.
+ */
+@Suppress("LongMethod")
+@Composable
+private fun MessageInput(
+    isEnabled: Boolean,
+    isHomoglyphEncodingEnabled: Boolean,
+    loraConfig: org.meshtastic.proto.Config.LoRaConfig,
+    textFieldState: TextFieldState,
+    modifier: Modifier = Modifier,
+    isSendingChunks: Boolean = false,
+    maxByteSize: Int = org.meshtastic.feature.messaging.component.MESSAGE_CHARACTER_LIMIT_BYTES,
+    onSendMessage: () -> Unit,
+    viewModel: MessageViewModel?,
+    contactKey: String,
+    onStopSendingChunks: () -> Unit = {},
+) {
+    MessageInputWithAttachments(
+        isEnabled = isEnabled,
+        isHomoglyphEncodingEnabled = isHomoglyphEncodingEnabled,
+        loraConfig = loraConfig,
+        textFieldState = textFieldState,
+        modifier = modifier,
+        isSendingChunks = isSendingChunks,
+        maxByteSize = maxByteSize,
+        onSendMessage = onSendMessage,
+        viewModel = viewModel,
+        contactKey = contactKey,
+        onStopSendingChunks = onStopSendingChunks,
+    )
+}
+
+@PreviewLightDark
+@Composable
+private fun MessageInputPreview() {
+    AppTheme {
+        Surface {
+            Column(modifier = Modifier.padding(8.dp)) {
+                val dummyContactKey = "preview"
+                MessageInput(
+                    isEnabled = true,
+                    isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
+                    textFieldState = rememberTextFieldState("Hello"),
+                    onSendMessage = {},
+                    viewModel = null,
+                    contactKey = dummyContactKey,
+                )
+                Spacer(Modifier.size(16.dp))
+                MessageInput(
+                    isEnabled = false,
+                    isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
+                    textFieldState = rememberTextFieldState("Disabled"),
+                    onSendMessage = {},
+                    viewModel = null,
+                    contactKey = dummyContactKey,
+                )
+                Spacer(Modifier.size(16.dp))
+                MessageInput(
+                    isEnabled = true,
+                    isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
+                    textFieldState =
+                        rememberTextFieldState(
+                            "A very long message that might exceed the byte limit " +
+                                "and cause an error state display for the user to see clearly.",
+                        ),
+                    onSendMessage = {},
+                    maxByteSize = 50,
+                    viewModel = null,
+                    contactKey = dummyContactKey,
+                )
+                Spacer(Modifier.size(16.dp))
+                // Test Japanese characters (multi-byte)
+                MessageInput(
+                    isEnabled = true,
+                    isHomoglyphEncodingEnabled = false,
+                    loraConfig = Channel.default.loraConfig,
+                    textFieldState = rememberTextFieldState("こんにちは世界"),
+                    onSendMessage = {},
+                    maxByteSize = 10,
+                    viewModel = null,
+                    contactKey = dummyContactKey,
+                    // Each char is 3 bytes, so "こん" (6 bytes) is ok, "こんに" (9 bytes) is ok, "こんにち"
+                    // (12 bytes) is over
+                )
             }
         }
     }

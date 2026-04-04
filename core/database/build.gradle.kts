@@ -34,8 +34,6 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
-            // MeshtasticDatabase extends RoomDatabase; expose runtime transitively to consumers.
-            api(libs.androidx.room.runtime)
             implementation(libs.androidx.sqlite.bundled)
 
             api(projects.core.common)
