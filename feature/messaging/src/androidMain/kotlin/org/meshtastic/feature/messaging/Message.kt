@@ -170,14 +170,6 @@ fun MessageScreen(
     // Prevent the message TextField from stealing focus when the screen opens
     LaunchedEffect(contactKey) { focusManager.clearFocus() }
 
-    fun showDeleteConfirmation() {
-        showDeleteDialog = true
-    }
-
-    fun dismissDeleteConfirmation() {
-        showDeleteDialog = false
-    }
-
     // Derived state, memoized for performance
     val channelInfo =
         remember(contactKey, channels) {
@@ -303,7 +295,7 @@ fun MessageScreen(
             onConfirm = {
                 onEvent(MessageScreenEvent.DeleteMessages(selectedMessageIds.value.toList()))
             },
-            onDismiss = ::dismissDeleteConfirmation,
+            onDismiss = { showDeleteDialog = false },
         )
     }
 
@@ -331,7 +323,7 @@ fun MessageScreen(
                                 onEvent(MessageScreenEvent.CopyToClipboard(copiedText))
                             }
 
-                            MessageMenuAction.Delete -> showDeleteConfirmation()
+                            MessageMenuAction.Delete -> showDeleteDialog = true
                             MessageMenuAction.Dismiss -> selectedMessageIds.value = emptySet()
                             MessageMenuAction.SelectAll -> {
                                 // Note: Select All is disabled with pagination since we don't have
