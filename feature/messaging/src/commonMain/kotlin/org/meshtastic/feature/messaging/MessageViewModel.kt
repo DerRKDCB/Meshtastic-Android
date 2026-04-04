@@ -57,7 +57,7 @@ import org.meshtastic.core.repository.usecase.SendMessageUseCase
 import org.meshtastic.core.ui.viewmodel.stateInWhileSubscribed
 import org.meshtastic.proto.ChannelSet
 
-@Suppress("LongParameterList", "TooManyFunctions", "UnusedPrivateProperty")
+@Suppress("LongParameterList", "TooManyFunctions")
 @OptIn(ExperimentalCoroutinesApi::class)
 @KoinViewModel
 class MessageViewModel(

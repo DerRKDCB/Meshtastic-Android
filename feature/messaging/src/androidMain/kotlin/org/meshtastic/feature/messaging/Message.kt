@@ -82,6 +82,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.launch
@@ -91,7 +92,6 @@ import org.meshtastic.core.common.util.HomoglyphCharacterStringTransformer
 import org.meshtastic.core.model.Channel
 import org.meshtastic.core.database.entity.QuickChatAction
 import org.meshtastic.core.model.DataPacket
-import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.util.getChannel
 import org.meshtastic.proto.Config
 import org.meshtastic.core.resources.Res
@@ -115,10 +115,7 @@ import org.meshtastic.feature.messaging.component.MessageTopBar
 import org.meshtastic.feature.messaging.component.QuickChatRow
 import org.meshtastic.feature.messaging.component.ReplySnippet
 import org.meshtastic.feature.messaging.component.ScrollToBottomFab
-import org.meshtastic.feature.messaging.image.DEFAULT_IMAGE_DUTY_CYCLE_PERCENT
-import org.meshtastic.feature.messaging.image.MIN_IMAGE_DUTY_CYCLE_PERCENT
 import org.meshtastic.feature.messaging.image.ImageAdjustmentDialog
-import org.meshtastic.feature.messaging.image.maxDutyCyclePercentForRegion
 import java.nio.charset.StandardCharsets
 
 private const val ROUNDED_CORNER_PERCENT = 100
@@ -155,7 +152,7 @@ fun MessageScreen(
     val quickChatActions by viewModel.quickChatActions.collectAsStateWithLifecycle(initialValue = emptyList())
     val isSendingChunks by viewModel.isSendingChunks.collectAsStateWithLifecycle()
     val pagedMessages = viewModel.getMessagesFromPaged(contactKey).collectAsLazyPagingItems()
-    val timelineMessages by viewModel.getMessagesFlow(contactKey).collectAsStateWithLifecycle(initialValue = emptyList())
+    val messages by viewModel.getMessagesFlow(contactKey).collectAsStateWithLifecycle(initialValue = emptyList())
     val imageChunkMessages by viewModel.imageChunkMessages.collectAsStateWithLifecycle()
     val contactSettings by viewModel.contactSettings.collectAsStateWithLifecycle(initialValue = emptyMap())
     val homoglyphEncodingEnabled by viewModel.homoglyphEncodingEnabled.collectAsStateWithLifecycle(initialValue = false)
@@ -418,8 +415,9 @@ fun MessageScreen(
                 MessageListPagedState(
                     nodes = nodes,
                     ourNode = ourNode,
-                    timelineMessages = timelineMessages,
+                    messages = messages,
                     imageChunkMessages = imageChunkMessages,
+                    isLoadingMore = pagedMessages.loadState.append is LoadState.Loading,
                     selectedIds = selectedMessageIds,
                     contactKey = contactKey,
                     firstUnreadMessageUuid = firstUnreadMessageUuid,

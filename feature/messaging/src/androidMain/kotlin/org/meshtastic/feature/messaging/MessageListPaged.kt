@@ -26,7 +26,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -49,7 +48,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.paging.compose.LazyPagingItems
 import android.text.format.Formatter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
@@ -94,8 +92,9 @@ internal data class MessageListHandlers(
 internal data class MessageListPagedState(
     val nodes: List<Node>,
     val ourNode: Node?,
-    val timelineMessages: List<Message>,
+    val messages: List<Message>,
     val imageChunkMessages: List<Message>,
+    val isLoadingMore: Boolean = false,
     val selectedIds: MutableState<Set<Long>>,
     val contactKey: String,
     val firstUnreadMessageUuid: Long? = null,
@@ -163,19 +162,19 @@ internal fun MessageListPaged(
     val hasDialogOpen = showStatusDialog != null || showReactionDialog != null
 
     // Track unread count based on scroll position
-    UpdateUnreadCountPaged(listState = listState, messages = state.timelineMessages, onUnreadChange = handlers.onUnreadChanged)
+    UpdateUnreadCountPaged(listState = listState, messages = state.messages, onUnreadChange = handlers.onUnreadChanged)
 
     // Only request older image chunks when the user scrolls back into older timeline history.
     LazyLoadOlderImageChunks(
         listState = listState,
-        messageCount = state.timelineMessages.size,
+        messageCount = state.messages.size,
         onLoadOlderImageChunks = handlers.onLoadOlderImageChunks,
     )
 
     // Auto-scroll to bottom when new messages arrive
     AutoScrollToBottomPaged(
         listState = listState,
-        messages = state.timelineMessages,
+        messages = state.messages,
         hasUnreadMessages = state.hasUnreadMessages,
         hasDialogOpen = hasDialogOpen,
     )
@@ -210,11 +209,11 @@ private fun MessageListPagedContent(
     modifier: Modifier = Modifier,
     quickEmojis: List<String>,
 ) {
-    val displayedMessages = state.timelineMessages
+    val messages = state.messages
 
     val timelineImageRowsResult = rememberTimelineImageRows(
         contactKey = state.contactKey,
-        displayedMessages = displayedMessages,
+        displayedMessages = messages,
         imageChunkMessages = state.imageChunkMessages,
     )
     val loadedImageRows: LoadedTimelineImageRows = timelineImageRowsResult.rows
@@ -223,10 +222,10 @@ private fun MessageListPagedContent(
     // Calculate unread divider position using snapshot to avoid side-effects and improve performance
     // Optimized: Use full snapshot index to correctly match LazyColumn index range
     val unreadDividerIndex by
-        remember(displayedMessages, state.firstUnreadMessageUuid) {
+        remember(messages, state.firstUnreadMessageUuid) {
             derivedStateOf {
                 val uuid = state.firstUnreadMessageUuid ?: return@derivedStateOf null
-                displayedMessages.indexOfFirst { it.uuid == uuid }.takeIf { it != -1 }
+                messages.indexOfFirst { it.uuid == uuid }.takeIf { it != -1 }
             }
         }
 
@@ -241,13 +240,13 @@ private fun MessageListPagedContent(
             contentPadding = PaddingValues(bottom = 24.dp),
         ) {
             items(
-                count = displayedMessages.size,
-                key = { index -> displayedMessages[index].uuid },
+                count = messages.size,
+                key = { index -> messages[index].uuid },
                 contentType = { "message" },
             ) { index ->
-                val message = displayedMessages[index]
-                val visuallyPrevMessage = if (index < displayedMessages.size - 1) displayedMessages[index + 1] else null
-                val visuallyNextMessage = if (index > 0) displayedMessages[index - 1] else null
+                val message = messages[index]
+                val visuallyPrevMessage = if (index < messages.size - 1) messages[index + 1] else null
+                val visuallyNextMessage = if (index > 0) messages[index - 1] else null
 
                 val hasSamePrev =
                     if (visuallyPrevMessage != null) {
@@ -284,7 +283,7 @@ private fun MessageListPagedContent(
                                 coroutineScope = coroutineScope,
                                 haptics = haptics,
                                 listState = listState,
-                                displayedMessages = displayedMessages,
+                                messages = messages,
                                 onShowStatusDialog = onShowStatusDialog,
                                 onShowReactions = onShowReactions,
                                 onInlineImageClick = onInlineImageClick,
@@ -307,7 +306,7 @@ private fun MessageListPagedContent(
                             coroutineScope = coroutineScope,
                             haptics = haptics,
                             listState = listState,
-                            displayedMessages = displayedMessages,
+                            messages = messages,
                             onShowStatusDialog = onShowStatusDialog,
                             onShowReactions = onShowReactions,
                             onInlineImageClick = onInlineImageClick,
@@ -317,6 +316,18 @@ private fun MessageListPagedContent(
                             hasSameNext = hasSameNext,
                             quickEmojis = quickEmojis,
                         )
+                    }
+                }
+            }
+
+            // Loading indicator at the end (top when reversed) when loading more items
+            if (state.isLoadingMore) {
+                item(key = "append_loading", contentType = "loading") {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
                     }
                 }
             }
@@ -339,7 +350,7 @@ private fun RenderPagedChatMessageRow(
     coroutineScope: CoroutineScope,
     haptics: HapticFeedback,
     listState: LazyListState,
-    displayedMessages: List<Message>,
+    messages: List<Message>,
     onShowStatusDialog: (Message) -> Unit,
     onShowReactions: (List<Reaction>) -> Unit,
     onInlineImageClick: (Int, Int) -> Unit,
@@ -429,7 +440,7 @@ private fun RenderPagedChatMessageRow(
         onShowReactions = { onShowReactions(message.emojis) },
         onNavigateToOriginalMessage = {
             coroutineScope.launch {
-                val targetIndex = displayedMessages.indexOfFirst { it.packetId == message.replyId }.takeIf { it != -1 }
+                val targetIndex = messages.indexOfFirst { it.packetId == message.replyId }.takeIf { it != -1 }
 
                 if (targetIndex != null) {
                     listState.animateScrollToItem(index = targetIndex)
