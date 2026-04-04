@@ -40,44 +40,25 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedback
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import android.text.format.Formatter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import org.jetbrains.compose.resources.stringResource
-import org.meshtastic.core.resources.Res
-import org.meshtastic.core.resources.position
-import org.meshtastic.core.resources.image_timeline_chunk_progress
-import org.meshtastic.core.database.entity.NodeEntity.Companion.degD
 import org.meshtastic.core.model.Message
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Reaction
-import org.meshtastic.core.model.DecodedPrivateAppPayload
-import org.meshtastic.core.model.PrivateAppPayloadType
-import org.meshtastic.core.model.decodePrivateAppPayload
-import org.meshtastic.feature.messaging.image.LoadedTimelineImageRows
-import org.meshtastic.feature.messaging.image.TimelinePrivateImageMessageData
-import org.meshtastic.feature.messaging.image.deleteImageUuidsFor
 import org.meshtastic.feature.messaging.image.rememberTimelineImageRows
-import org.meshtastic.feature.messaging.image.savePrivateFileAttachmentToDevice
-import org.meshtastic.feature.messaging.image.openPrivateFileAttachmentWithApp
-import org.meshtastic.feature.messaging.component.MessageItem
 import org.meshtastic.feature.messaging.component.MessageStatusDialog
 import org.meshtastic.feature.messaging.component.ReactionDialog
 import org.meshtastic.feature.messaging.component.UnreadMessagesDivider
-import org.meshtastic.core.ui.util.rememberOpenMap
 
 internal data class MessageListHandlers(
     val onUnreadChanged: (Long, Long) -> Unit,
@@ -104,7 +85,7 @@ internal data class MessageListPagedState(
     val filteringDisabled: Boolean = false,
 )
 
-private fun MutableState<Set<Long>>.toggle(uuid: Long) {
+internal fun MutableState<Set<Long>>.toggle(uuid: Long) {
     value =
         if (value.contains(uuid)) {
             value - uuid
@@ -216,8 +197,8 @@ private fun MessageListPagedContent(
         displayedMessages = messages,
         imageChunkMessages = state.imageChunkMessages,
     )
-    val loadedImageRows: LoadedTimelineImageRows = timelineImageRowsResult.rows
-    val onInlineImageClick: (Int, Int) -> Unit = timelineImageRowsResult.onInlineImageClick
+    val loadedImageRows = timelineImageRowsResult.rows
+    val onInlineImageClick = timelineImageRowsResult.onInlineImageClick
 
     // Calculate unread divider position using snapshot to avoid side-effects and improve performance
     // Optimized: Use full snapshot index to correctly match LazyColumn index range
@@ -336,163 +317,6 @@ private fun MessageListPagedContent(
     }
 }
 
-@Suppress("LongParameterList")
-@Composable
-private fun RenderPagedChatMessageRow(
-    message: Message,
-    inlineImageData: TimelinePrivateImageMessageData?,
-    inlineAttachmentLabel: String?,
-    inlineAttachmentPayload: org.meshtastic.core.model.DecodedPrivateAppPayload?,
-    state: MessageListPagedState,
-    nodeMap: Map<Int, Node>,
-    handlers: MessageListHandlers,
-    inSelectionMode: Boolean,
-    coroutineScope: CoroutineScope,
-    haptics: HapticFeedback,
-    listState: LazyListState,
-    messages: List<Message>,
-    onShowStatusDialog: (Message) -> Unit,
-    onShowReactions: (List<Reaction>) -> Unit,
-    onInlineImageClick: (Int, Int) -> Unit,
-    modifier: Modifier = Modifier,
-    showUserName: Boolean,
-    hasSamePrev: Boolean,
-    hasSameNext: Boolean,
-    quickEmojis: List<String>,
-) {
-    val ourNode = state.ourNode ?: return
-    val context = LocalContext.current
-    val openMap = rememberOpenMap()
-    val positionTitle = stringResource(Res.string.position)
-    var fileAttachmentDialog by remember { mutableStateOf<DecodedPrivateAppPayload?>(null) }
-    val selected by
-        remember(message.uuid, state.selectedIds.value) {
-            derivedStateOf { state.selectedIds.value.contains(message.uuid) }
-        }
-    val node = nodeMap[message.node.num] ?: message.node
-    val inlineImageBitmap =
-        remember(message.uuid, inlineImageData?.bitmap) {
-            inlineImageData?.bitmap?.asImageBitmap()
-        }
-    val inlineImageChunkInfoText =
-        inlineImageData?.let {
-            stringResource(Res.string.image_timeline_chunk_progress, it.availableChunks, it.totalChunks)
-        }
-    val directAttachmentPayload =
-        remember(message.uuid, message.privatePayloadBytes) {
-            message.privatePayloadBytes?.let { decodePrivateAppPayload(it) }
-        }
-    val resolvedAttachmentPayload = inlineAttachmentPayload ?: directAttachmentPayload
-    val resolvedAttachmentLabel =
-        inlineAttachmentLabel ?: directAttachmentPayload?.let { payload ->
-            when (payload.type) {
-                PrivateAppPayloadType.File -> {
-                    val fileSize = payload.fileSize ?: payload.payload.size.toLong()
-                    val sizeText = Formatter.formatShortFileSize(context, fileSize)
-                    payload.fileName?.let { "File: $it • $sizeText" } ?: "File • $sizeText"
-                }
-                PrivateAppPayloadType.Position -> payload.position?.let {
-                    val latitude = degD(it.latitude_i ?: 0)
-                    val longitude = degD(it.longitude_i ?: 0)
-                    String.format("%s: %.6f, %.6f", positionTitle, latitude, longitude)
-                } ?: positionTitle
-                PrivateAppPayloadType.Image -> "Image"
-            }
-        }
-
-    MessageItem(
-        modifier = modifier,
-        node = node,
-        ourNode = ourNode,
-        message = message,
-        inlineImageBitmap = inlineImageBitmap,
-        inlineImageChunkInfoText = inlineImageChunkInfoText,
-        inlineAttachmentLabel = resolvedAttachmentLabel,
-        inlineAttachmentPayload = resolvedAttachmentPayload,
-        selected = selected,
-        inSelectionMode = inSelectionMode,
-        onClick = { if (inSelectionMode) state.selectedIds.toggle(message.uuid) },
-        onLongClick = {
-            if (inSelectionMode) {
-                state.selectedIds.toggle(message.uuid)
-            }
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        },
-        onSelect = { state.selectedIds.toggle(message.uuid) },
-        onDelete = { handlers.onDeleteMessages(deleteImageUuidsFor(message, state.imageChunkMessages)) },
-        onClickChip = handlers.onClickChip,
-        onStatusClick = { onShowStatusDialog(message) },
-        onReply = { handlers.onReply(message) },
-        emojis = message.emojis,
-        showUserName = showUserName,
-        sendReaction = { emoji ->
-            val hasReacted =
-                message.emojis.any { reaction ->
-                    (
-                        reaction.user.id == ourNode.user.id ||
-                            reaction.user.id == org.meshtastic.core.model.DataPacket.ID_LOCAL
-                        ) && reaction.emoji == emoji
-                }
-            if (!hasReacted) {
-                handlers.onSendReaction(emoji, message.packetId)
-            }
-        },
-        onShowReactions = { onShowReactions(message.emojis) },
-        onNavigateToOriginalMessage = {
-            coroutineScope.launch {
-                val targetIndex = messages.indexOfFirst { it.packetId == message.replyId }.takeIf { it != -1 }
-
-                if (targetIndex != null) {
-                    listState.animateScrollToItem(index = targetIndex)
-                }
-            }
-        },
-        onInlineImageClick = {
-            message.privatePayloadId?.let { payloadId ->
-                onInlineImageClick(payloadId, message.node.num)
-            }
-        },
-        onInlineAttachmentClick = {
-            resolvedAttachmentPayload?.let { payload ->
-                when (payload.type) {
-                    PrivateAppPayloadType.File -> fileAttachmentDialog = payload
-                    PrivateAppPayloadType.Position -> payload.position?.let {
-                        openMap(
-                            degD(it.latitude_i ?: 0),
-                            degD(it.longitude_i ?: 0),
-                            positionTitle,
-                        )
-                    }
-                    PrivateAppPayloadType.Image -> Unit
-                }
-            }
-        },
-        hasSamePrev = hasSamePrev,
-        hasSameNext = hasSameNext,
-        quickEmojis = quickEmojis,
-    )
-
-    fileAttachmentDialog?.let { payload ->
-        val fileName = payload.fileName ?: "attachment"
-        val fileSize = payload.fileSize
-        val fileSizeText = fileSize?.let { Formatter.formatShortFileSize(context, it) }
-        val isComplete = fileSize == null || payload.payload.size.toLong() >= fileSize
-        FileAttachmentActionDialog(
-            fileNameText = fileName,
-            fileSizeText = fileSizeText,
-            isComplete = isComplete,
-            onSaveToPhone = {
-                savePrivateFileAttachmentToDevice(context, payload)
-                fileAttachmentDialog = null
-            },
-            onOpenWithApp = {
-                openPrivateFileAttachmentWithApp(context, payload)
-                fileAttachmentDialog = null
-            },
-            onDismiss = { fileAttachmentDialog = null },
-        )
-    }
-}
 
 @Suppress("CyclomaticComplexMethod")
 @Composable

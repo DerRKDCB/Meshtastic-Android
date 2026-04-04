@@ -19,20 +19,16 @@ package org.meshtastic.feature.messaging.component
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.FormatQuote
 import androidx.compose.material3.CardDefaults
@@ -54,7 +50,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -71,7 +66,6 @@ import org.meshtastic.core.model.DecodedPrivateAppPayload
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.filter_message_label
 import org.meshtastic.core.resources.reply
-import org.meshtastic.core.ui.component.AutoLinkText
 import org.meshtastic.core.ui.component.NodeChip
 import org.meshtastic.core.ui.component.Rssi
 import org.meshtastic.core.ui.component.Snr
@@ -274,62 +268,20 @@ fun MessageItem(
             )
 
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
-                if (inlineImageBitmap == null && inlineAttachmentLabel == null && !isPrivateImageChunk) {
-                    AutoLinkText(
-                        text = message.text,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = cardColors.contentColor,
-                    )
-                }
-
-                inlineAttachmentLabel?.let { attachmentLabel ->
-                    Text(
-                        text = attachmentLabel,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier =
-                            Modifier.padding(top = 4.dp).clickable(enabled = inlineAttachmentPayload != null) {
-                                onInlineAttachmentClick()
-                            },
-                    )
-                }
-
-                inlineImageBitmap?.let { imageBitmap ->
-                    val imageAspectRatio =
-                        if (imageBitmap.height > 0) {
-                            imageBitmap.width.toFloat() / imageBitmap.height.toFloat()
-                        } else {
-                            1f
-                        }
-                    Image(
-                        bitmap = imageBitmap,
-                        contentDescription = "Image message",
-                        contentScale = ContentScale.Fit,
-                        modifier =
-                            Modifier.padding(top = 4.dp)
-                                .widthIn(min = 180.dp, max = 320.dp)
-                                .heightIn(min = 140.dp, max = 360.dp)
-                                .combinedClickable(
-                                    onClick = onInlineImageClick,
-                                    onLongClick = {
-                                        onLongClick()
-                                        if (!inSelectionMode) {
-                                            activeSheet = ActiveSheet.Actions
-                                        }
-                                    },
-                                )
-                                .aspectRatio(imageAspectRatio, matchHeightConstraintsFirst = false),
-                    )
-                }
-
-                inlineImageChunkInfoText?.let { chunkInfoText ->
-                    Text(
-                        text = chunkInfoText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
+                MessageInlineAttachmentContent(
+                    message = message,
+                    inlineImageBitmap = inlineImageBitmap,
+                    inlineImageChunkInfoText = inlineImageChunkInfoText,
+                    inlineAttachmentLabel = inlineAttachmentLabel,
+                    inlineAttachmentPayload = inlineAttachmentPayload,
+                    isPrivateImageChunk = isPrivateImageChunk,
+                    inSelectionMode = inSelectionMode,
+                    messageTextColor = cardColors.contentColor,
+                    onLongClick = onLongClick,
+                    onOpenActions = { activeSheet = ActiveSheet.Actions },
+                    onInlineImageClick = onInlineImageClick,
+                    onInlineAttachmentClick = onInlineAttachmentClick,
+                )
 
                 Row(modifier = Modifier, verticalAlignment = Alignment.CenterVertically) {
                     if (!message.fromLocal) {
